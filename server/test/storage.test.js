@@ -134,3 +134,141 @@ test('upsertCredential non-updated entries are also distinct references', () => 
   // But its data is preserved
   assert.deepEqual(result[1], original[1]);
 });
+
+import { writeAtomic, recoverOrphanedFile, writeCredentials, readCredentials } from '../src/storage.js';
+
+test('writeAtomic creates temporary file before atomic rename', async () => {
+  const testFilePath = path.join(testDataDir, 'test-atomic.json');
+  const testTempPath = `${testFilePath}.tmp`;
+  const testData = JSON.stringify({ test: 'data' }, null, 2);
+  
+  // Clean up any existing files
+  if (fs.existsSync(testDataDir)) {
+    await fsPromises.rm(testDataDir, { recursive: true, force: true });
+  }
+  await fsPromises.mkdir(testDataDir, { recursive: true });
+  
+  // Write using writeAtomic
+  await writeAtomic(testFilePath, testData);
+  
+  // Verify main file exists
+  assert.ok(fs.existsSync(testFilePath), 'Main file should exist');
+  // Verify temp file does NOT exist (should have been renamed)
+  assert.ok(!fs.existsSync(testTempPath), 'Temp file should not exist after successful write');
+  
+  // Verify content
+  const content = await fsPromises.readFile(testFilePath, 'utf8');
+  assert.equal(content, testData);
+});
+
+test('recoverOrphanedFile recovers .tmp file when canonical is missing', async () => {
+  const testFilePath = path.join(testDataDir, 'test-recovery.json');
+  const testTempPath = `${testFilePath}.tmp`;
+  const testData = '{"recovered": true}';
+  
+  // Clean up any existing files
+  if (fs.existsSync(testDataDir)) {
+    await fsPromises.rm(testDataDir, { recursive: true, force: true });
+  }
+  await fsPromises.mkdir(testDataDir, { recursive: true });
+  
+  // Create only temp file (simulating crash during write)
+  await fsPromises.writeFile(testTempPath, testData, 'utf8');
+  
+  // Recover orphaned file
+  const recovered = await recoverOrphanedFile(testFilePath);
+  assert.equal(recovered, true, 'Should have recovered file');
+  
+  // Verify canonical file now exists with correct content
+  assert.ok(fs.existsSync(testFilePath), 'Canonical file should exist after recovery');
+  assert.ok(!fs.existsSync(testTempPath), 'Temp file should not exist after recovery');
+  
+  const content = await fsPromises.readFile(testFilePath, 'utf8');
+  assert.equal(content, testData);
+});
+
+test('recoverOrphanedFile cleans up .tmp file when canonical exists', async () => {
+  const testFilePath = path.join(testDataDir, 'test-cleanup.json');
+  const testTempPath = `${testFilePath}.tmp`;
+  const canonicalData = '{"canonical": true}';
+  const tempData = '{"temp": true}';
+  
+  // Clean up any existing files
+  if (fs.existsSync(testDataDir)) {
+    await fsPromises.rm(testDataDir, { recursive: true, force: true });
+  }
+  await fsPromises.mkdir(testDataDir, { recursive: true });
+  
+  // Create both files (simulating crash after rename but before temp deletion)
+  await fsPromises.writeFile(testFilePath, canonicalData, 'utf8');
+  await fsPromises.writeFile(testTempPath, tempData, 'utf8');
+  
+  // Recover orphaned file
+  const recovered = await recoverOrphanedFile(testFilePath);
+  assert.equal(recovered, false, 'Should not have recovered file (canonical exists)');
+  
+  // Verify canonical file still exists with original content
+  assert.ok(fs.existsSync(testFilePath), 'Canonical file should still exist');
+  assert.ok(!fs.existsSync(testTempPath), 'Temp file should have been cleaned up');
+  
+  const content = await fsPromises.readFile(testFilePath, 'utf8');
+  assert.equal(content, canonicalData);
+});
+
+test('writeCredentials uses writeAtomic for crash-safe writes', async () => {
+  // Clean up any existing files
+  if (fs.existsSync(testDataDir)) {
+    await fsPromises.rm(testDataDir, { recursive: true, force: true });
+  }
+  await ensureDataDir(config);
+  
+  const testCredentials = [
+    { id: 'cred-1', name: 'Test Credential 1' },
+    { id: 'cred-2', name: 'Test Credential 2' }
+  ];
+  
+  // Write credentials
+  await writeCredentials(config, testCredentials);
+  
+  // Verify main file exists
+  assert.ok(fs.existsSync(config.credentialStorePath), 'Credential store file should exist');
+  
+  // Verify no temp file exists
+  const tempPath = `${config.credentialStorePath}.tmp`;
+  assert.ok(!fs.existsSync(tempPath), 'Temp file should not exist after successful write');
+  
+  // Verify content can be read back
+  const credentials = await readCredentials(config);
+  assert.equal(credentials.length, 2);
+  assert.equal(credentials[0].id, 'cred-1');
+  assert.equal(credentials[1].id, 'cred-2');
+});
+
+test('ensureDataDir recovers orphaned .tmp files on startup', async () => {
+  // Clean up any existing files
+  if (fs.existsSync(testDataDir)) {
+    await fsPromises.rm(testDataDir, { recursive: true, force: true });
+  }
+  
+  // Create temp file only (simulating crash during credential write)
+  const tempPath = `${config.credentialStorePath}.tmp`;
+  const tempData = JSON.stringify({ 
+    credentials: [{ id: 'recovered-cred', name: 'Recovered Credential' }] 
+  }, null, 2);
+  
+  await fsPromises.mkdir(path.dirname(config.credentialStorePath), { recursive: true });
+  await fsPromises.writeFile(tempPath, tempData, 'utf8');
+  
+  // Run ensureDataDir (should trigger recovery)
+  await ensureDataDir(config);
+  
+  // Verify recovery happened
+  assert.ok(fs.existsSync(config.credentialStorePath), 'Credential store should exist after recovery');
+  assert.ok(!fs.existsSync(tempPath), 'Temp file should not exist after recovery');
+  
+  // Verify recovered content
+  const credentials = await readCredentials(config);
+  assert.equal(credentials.length, 1);
+  assert.equal(credentials[0].id, 'recovered-cred');
+  assert.equal(credentials[0].name, 'Recovered Credential');
+});

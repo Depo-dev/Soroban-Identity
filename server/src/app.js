@@ -20,8 +20,20 @@ const SERVER_FEATURES = ["webhook_delivery", "batch_issuance", "event_polling"];
 
 export function createApp({ config, soroban, metrics, metricsAggregator }) {
   return function app(req, res) {
-    const requestId = req.headers["x-request-id"] || crypto.randomUUID();
-    res.setHeader("X-Request-ID", requestId);
+    const url = new URL(
+      req.url,
+      `http://${req.headers.host ?? "localhost"}`,
+    );
+
+    // Check if this is the metrics endpoint before setting X-Request-ID
+    const isMetricsEndpoint = req.method === "GET" && url.pathname === "/metrics";
+    
+    // Generate requestId for all endpoints except metrics
+    const requestId = isMetricsEndpoint ? null : (req.headers["x-request-id"] || crypto.randomUUID());
+    
+    if (!isMetricsEndpoint) {
+      res.setHeader("X-Request-ID", requestId);
+    }
 
     // Apply CORS headers
     if (setCorsHeaders(req, res, config)) {
@@ -31,11 +43,6 @@ export function createApp({ config, soroban, metrics, metricsAggregator }) {
 
     return requestContextStore.run({ requestId }, async () => {
       try {
-        const url = new URL(
-          req.url,
-          `http://${req.headers.host ?? "localhost"}`,
-        );
-
         if (req.method === "GET" && url.pathname === "/info") {
           return sendJson(res, 200, {
             version: SERVER_VERSION,
