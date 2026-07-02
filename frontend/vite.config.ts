@@ -42,4 +42,9 @@ export default defineConfig({
   preview: {
     headers: SECURITY_HEADERS,
   },
+  test: {
+    environment: "jsdom",
+    globals: false,
+    setupFiles: ["./src/setupTests.ts"],
+  },
 });

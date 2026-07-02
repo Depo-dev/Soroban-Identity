@@ -67,8 +67,86 @@ export async function appendAuditLog(config, entry) {
   }
 
   const record = { timestamp: new Date().toISOString(), ...entry };
-  await fs.appendFile(currentLogPath, `${JSON.stringify(record)}\n`, 'utf8');
+  const line = `${JSON.stringify(record)}\n`;
+
+  // Acquire a per-file mutex so concurrent callers queue up and each write
+  // lands as a complete NDJSON line rather than being interleaved.
+  const release = await _acquireAuditLock(currentLogPath);
+  try {
+    await fs.appendFile(currentLogPath, line, 'utf8');
+  } finally {
+    release();
+  }
+
   return record;
+}
+
+// ---------------------------------------------------------------------------
+// Minimal per-path mutex — no external dependencies required.
+// Each entry in the map is a Promise chain; callers append to the tail so they
+// execute one at a time for a given file path.
+// ---------------------------------------------------------------------------
+const _auditLocks = new Map();
+
+/**
+ * Track the number of waiters queued per file path so we can warn if the
+ * queue grows too deep (indicating a slow disk or a runaway caller).
+ */
+const _auditLockDepth = new Map();
+
+/** Emit a warning when the queue depth for any single file exceeds this limit. */
+const AUDIT_LOCK_WARN_DEPTH = 1000;
+
+/**
+ * Acquire an exclusive write lock for `filePath`.
+ * Returns a release function that MUST be called (in a finally block) to
+ * unblock the next waiter.
+ *
+ * Logs a warning when the pending queue depth for a given file path exceeds
+ * AUDIT_LOCK_WARN_DEPTH (1000) to surface runaway callers or slow-disk
+ * conditions before the queue grows unboundedly.
+ *
+ * @param {string} filePath
+ * @returns {Promise<() => void>}
+ */
+function _acquireAuditLock(filePath) {
+  // Retrieve (or create) the current tail of the promise chain for this path.
+  const current = _auditLocks.get(filePath) ?? Promise.resolve();
+
+  // Track queue depth and warn if it grows unboundedly.
+  const depth = (_auditLockDepth.get(filePath) ?? 0) + 1;
+  _auditLockDepth.set(filePath, depth);
+  if (depth > AUDIT_LOCK_WARN_DEPTH) {
+    console.warn(
+      `[appendAuditLog] Write queue depth for "${filePath}" is ${depth}, ` +
+        `which exceeds the warning threshold of ${AUDIT_LOCK_WARN_DEPTH}. ` +
+        'The disk may be slow or callers are overwhelming the log endpoint.',
+    );
+  }
+
+  let release;
+  // Build a new promise whose resolution is controlled by the caller.
+  const next = new Promise((resolve) => {
+    release = resolve;
+  });
+
+  // The new tail: wait for the previous holder to finish, then let this caller
+  // proceed.  We store the unchained `next` as the new tail so the *next*
+  // caller waits for *this* caller to release.
+  _auditLocks.set(
+    filePath,
+    // Chain: when `current` resolves the next caller can enter.
+    // We keep `next` in the map (not `current.then(...)`) so that garbage
+    // collection can collect settled promises once the queue drains.
+    current.then(() => next),
+  );
+
+  // Return a promise that resolves to the release function once the previous
+  // holder has finished.  Decrement the depth counter on entry.
+  return current.then(() => {
+    _auditLockDepth.set(filePath, (_auditLockDepth.get(filePath) ?? 1) - 1);
+    return release;
+  });
 }
 
 export async function readCredentials(config) {

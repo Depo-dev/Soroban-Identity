@@ -10,7 +10,7 @@ interface WalletContextValue extends WalletState {
   signTransaction: (xdr: string) => Promise<string>;
 }
 
-const WalletContext = createContext<WalletContextValue | null>(null);
+export const WalletContext = createContext<WalletContextValue | null>(null);
 
 export function WalletProvider({ children }: { children: ReactNode }) {
   const networkConfig: FrontendNetworkConfig = getNetworkConfig();
