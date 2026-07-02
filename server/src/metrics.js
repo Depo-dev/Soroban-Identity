@@ -32,8 +32,21 @@ export class MetricsService {
   renderPrometheus() {
     const lines = [];
     for (const [name, value] of Object.entries(this.counters)) {
+      // Add HELP annotations for each counter
+      let helpText = '';
+      if (name === 'dids_created_total') helpText = 'Total number of DIDs created';
+      else if (name === 'credentials_issued_total') helpText = 'Total number of credentials issued';
+      else if (name === 'credentials_revoked_total') helpText = 'Total number of credentials revoked';
+      else if (name === 'reputation_scores_submitted_total') helpText = 'Total number of reputation scores submitted';
+      else if (name === 'rpc_cache_hits_total') helpText = 'Total number of RPC cache hits';
+      else if (name === 'rpc_cache_misses_total') helpText = 'Total number of RPC cache misses';
+      else if (name === 'rpc_retries_total') helpText = 'Total number of RPC retries';
+      
+      if (helpText) lines.push(`# HELP ${name} ${helpText}`);
       lines.push(`# TYPE ${name} counter`, `${name} ${value}`);
     }
+    
+    lines.push('# HELP soroban_rpc_call_latency_seconds Soroban RPC call latency in seconds');
     lines.push('# TYPE soroban_rpc_call_latency_seconds histogram');
     let cumulative = 0;
     for (const bucket of HISTOGRAM_BUCKETS) {

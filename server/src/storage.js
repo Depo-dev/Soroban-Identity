@@ -31,6 +31,78 @@ export async function loadStorageAdapter() {
 
 export function getStorageAdapter() { return _customAdapter; }
 
+// ── Write-Ahead Log (WAL) for crash-safe storage ─────────────────────────────
+/**
+ * Atomically write data to a file using a write-ahead log pattern.
+ * 1. Write to a temporary file (.tmp)
+ * 2. Fully flush the temporary file
+ * 3. Atomically rename it over the canonical file
+ * 
+ * @param {string} filePath - The target file path
+ * @param {string} data - The data to write
+ * @returns {Promise<void>}
+ */
+export async function writeAtomic(filePath, data) {
+  const tempPath = `${filePath}.tmp`;
+  
+  // Step 1: Write to temporary file
+  await fs.writeFile(tempPath, data, 'utf8');
+  
+  // Step 2: Ensure the file is fully flushed
+  // Node.js fs.writeFile with 'utf8' encoding does sync write, but we'll
+  // explicitly fsync to ensure durability
+  const tempFile = await fs.open(tempPath, 'r');
+  try {
+    await tempFile.sync();
+  } finally {
+    await tempFile.close();
+  }
+  
+  // Step 3: Atomically rename
+  await fs.rename(tempPath, filePath);
+}
+
+/**
+ * Recover orphaned .tmp files on startup.
+ * Should be called before accepting requests.
+ * 
+ * @param {string} filePath - The canonical file path to check for recovery
+ * @returns {Promise<boolean>} True if recovery was performed, false otherwise
+ */
+export async function recoverOrphanedFile(filePath) {
+  const tempPath = `${filePath}.tmp`;
+  
+  try {
+    await fs.access(tempPath);
+    // Temporary file exists, check if canonical file exists
+    let canonicalExists = false;
+    try {
+      await fs.access(filePath);
+      canonicalExists = true;
+    } catch (error) {
+      if (error.code !== 'ENOENT') throw error;
+    }
+    
+    if (!canonicalExists) {
+      // No canonical file, rename temp to canonical
+      logger.info({ filePath, tempPath }, 'Recovering orphaned .tmp file');
+      await fs.rename(tempPath, filePath);
+      return true;
+    } else {
+      // Both files exist, keep canonical and delete temp
+      logger.info({ filePath, tempPath }, 'Cleaning up orphaned .tmp file (canonical exists)');
+      await fs.unlink(tempPath);
+      return false;
+    }
+  } catch (error) {
+    if (error.code === 'ENOENT') {
+      // No orphaned file
+      return false;
+    }
+    throw error;
+  }
+}
+
 let lastCheckedDate = null;
 
 export async function cleanOldAuditLogs(config) {
@@ -84,6 +156,9 @@ export async function ensureDataDir(config) {
   await fs.mkdir(path.dirname(config.auditLogPath), { recursive: true });
   await fs.mkdir(path.dirname(config.credentialStorePath), { recursive: true });
   await cleanOldAuditLogs(config);
+  
+  // Recover orphaned .tmp files on startup
+  await recoverOrphanedFile(config.credentialStorePath);
 }
 
 export async function appendAuditLog(config, entry) {
@@ -124,7 +199,7 @@ export async function readCredentials(config) {
 
 export async function writeCredentials(config, credentials) {
   await ensureDataDir(config);
-  await fs.writeFile(config.credentialStorePath, JSON.stringify({ credentials }, null, 2), 'utf8');
+  await writeAtomic(config.credentialStorePath, JSON.stringify({ credentials }, null, 2));
   _credentialCache = null;
   _cacheTimestamp = 0;
 }

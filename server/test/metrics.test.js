@@ -13,9 +13,26 @@ test('metrics service renders Prometheus counters and latency histogram', () => 
   metrics.observeRpcLatency(0.2);
   const rendered = metrics.renderPrometheus();
 
+  // Verify counters are present
   assert.match(rendered, /dids_created_total 1/);
   assert.match(rendered, /credentials_issued_total 1/);
   assert.match(rendered, /credentials_revoked_total 1/);
   assert.match(rendered, /reputation_scores_submitted_total 1/);
+  
+  // Verify HELP annotations are present
+  assert.match(rendered, /# HELP dids_created_total Total number of DIDs created/);
+  assert.match(rendered, /# HELP credentials_issued_total Total number of credentials issued/);
+  assert.match(rendered, /# HELP credentials_revoked_total Total number of credentials revoked/);
+  assert.match(rendered, /# HELP reputation_scores_submitted_total Total number of reputation scores submitted/);
+  
+  // Verify TYPE annotations are present
+  assert.match(rendered, /# TYPE dids_created_total counter/);
+  assert.match(rendered, /# TYPE credentials_issued_total counter/);
+  assert.match(rendered, /# TYPE credentials_revoked_total counter/);
+  assert.match(rendered, /# TYPE reputation_scores_submitted_total counter/);
+  
+  // Verify histogram metrics
+  assert.match(rendered, /# HELP soroban_rpc_call_latency_seconds Soroban RPC call latency in seconds/);
+  assert.match(rendered, /# TYPE soroban_rpc_call_latency_seconds histogram/);
   assert.match(rendered, /soroban_rpc_call_latency_seconds_count 1/);
 });
