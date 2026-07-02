@@ -52,7 +52,7 @@ export {
   REPUTATION_ERRORS,
 } from './error-codes';
 export { clearServerCache, SDK_VERSION } from './base-client';
-export { toW3CDidDocument, exportDidDocumentAsJsonLd, flattenSubject } from './serializers';
+export { toW3CDidDocument, exportDidDocumentAsJsonLd, flattenSubject, serializeClaimValue, hashSubjectClaims } from './serializers';
 export {
   buildCreateDidArgs,
   buildUpdateDidArgs,
