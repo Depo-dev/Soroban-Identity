@@ -9,6 +9,7 @@ import Toast from "./components/Toast";
 import { ToastProvider } from "./context/ToastContext";
 import { useWallet } from "./hooks/useWallet";
 import { useCredentialExpiryCheck } from "./hooks/useCredentialExpiryCheck";
+import { useTheme, cycleTheme, getThemeIcon, getThemeLabel } from "./hooks/useTheme";
 import {
   DEFAULT_NETWORK,
   NETWORK_CONFIGS,
@@ -30,30 +31,13 @@ export enum Tab {
   Credentials = "credentials",
 }
 
-function useDarkMode(): [boolean, () => void] {
-  const [isDark, setIsDark] = useState<boolean>(() => {
-    const stored = localStorage.getItem("dark-mode");
-    if (stored !== null) return stored === "true";
-    return window.matchMedia("(prefers-color-scheme: dark)").matches;
-  });
-
-  useEffect(() => {
-    const html = document.documentElement;
-    html.classList.toggle("dark", isDark);
-    html.classList.toggle("light", !isDark);
-    localStorage.setItem("dark-mode", String(isDark));
-  }, [isDark]);
-
-  return [isDark, () => setIsDark((d) => !d)];
-}
-
 export default function App() {
   const [tab, setTab] = useState<Tab>(Tab.Identity);
   const [activeNetwork, setActiveNetwork] = useState<NetworkName>(DEFAULT_NETWORK);
   const [verifyId, setVerifyId] = useState<string | null>(null);
   const networkConfig = NETWORK_CONFIGS[activeNetwork];
   const wallet = useWallet(networkConfig);
-  const [isDark, toggleDark] = useDarkMode();
+  const [theme, setTheme, isDarkMode] = useTheme();
   const { t, i18n } = useTranslation();
   const [isConnected, setIsConnected] = useState<boolean | null>(null);
   const [uninitializedContracts, setUninitializedContracts] = useState<string[]>([]);
@@ -191,10 +175,11 @@ export default function App() {
           </label>
           <button
             className="theme-toggle"
-            onClick={toggleDark}
-            aria-label={isDark ? "Switch to light mode" : "Switch to dark mode"}
+            onClick={() => setTheme(cycleTheme(theme))}
+            aria-label={`Switch theme. Current: ${theme === 'system' ? 'System' : theme === 'light' ? 'Light' : 'Dark'}`}
+            title={`Theme: ${theme === 'system' ? 'System' : theme === 'light' ? 'Light' : 'Dark'}`}
           >
-            {isDark ? t("app.lightMode") : t("app.darkMode")}
+            {getThemeIcon(theme, isDarkMode)} {getThemeLabel(theme, isDarkMode, t)}
           </button>
           <WalletButton wallet={wallet} />
         </div>

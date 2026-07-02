@@ -46,12 +46,17 @@
   --filter-badge-active-text: #ffffff;
   --btn-text:                 #ffffff;
   --focus-ring:               #7c3aed;
+  --success-bg:               var(--badge-green-bg);
+  --success-text:             var(--badge-green-text);
+  --danger-bg:                var(--badge-red-bg);
+  --danger-text:              var(--badge-red-text);
+  --danger-border:            #f87171;
 }
 
-/* ── Dark mode via system preference ─────────────────────────────────────────── */
+/* ── Dark mode via system preference (when no manual override) ──────────────── */
 
 @media (prefers-color-scheme: dark) {
-  :root {
+  :root:not(.light):not(.dark) {
     --bg:                       #0a0a0f;
     --bg-subtle:                #0f172a;
     --card-bg:                  #111827;
@@ -95,6 +100,11 @@
     --filter-badge-active-text: #1e1b4b;
     --btn-text:                 #ffffff;
     --focus-ring:               #a78bfa;
+    --success-bg:               var(--badge-green-bg);
+    --success-text:             var(--badge-green-text);
+    --danger-bg:                var(--badge-red-bg);
+    --danger-text:              var(--badge-red-text);
+    --danger-border:            #f87171;
   }
 }
 
@@ -144,6 +154,11 @@ html.dark {
   --filter-badge-active-text: #1e1b4b;
   --btn-text:                 #ffffff;
   --focus-ring:               #a78bfa;
+  --success-bg:               var(--badge-green-bg);
+  --success-text:             var(--badge-green-text);
+  --danger-bg:                var(--badge-red-bg);
+  --danger-text:              var(--badge-red-text);
+  --danger-border:            #f87171;
 }
 
 /* ── Light mode forced via manual class toggle ───────────────────────────────── */
@@ -192,6 +207,11 @@ html.light {
   --filter-badge-active-text: #ffffff;
   --btn-text:                 #ffffff;
   --focus-ring:               #7c3aed;
+  --success-bg:               var(--badge-green-bg);
+  --success-text:             var(--badge-green-text);
+  --danger-bg:                var(--badge-red-bg);
+  --danger-text:              var(--badge-red-text);
+  --danger-border:            #f87171;
 }
 
 /* ── Base styles ─────────────────────────────────────────────────────────────── */
