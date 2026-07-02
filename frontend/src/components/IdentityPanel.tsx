@@ -1,4 +1,4 @@
-import { useState, useReducer, useEffect } from 'react';
+import { useState, useReducer, useEffect, useRef } from 'react';
 import { QRCodeSVG } from 'qrcode.react';
 import { StrKey } from '@stellar/stellar-sdk';
 import type { WalletState } from '../hooks/useWallet';
@@ -480,7 +480,7 @@ export default function IdentityPanel() {
           {resolving ? 'Resolving…' : 'Resolve'}
         </button>
         {resolving && <SkeletonCard variant="identity" />}
-        {!resolving && resolveResult && (
+        {!resolving && resolvedAddress && (
           <>
             <div style={{ 
               display: 'flex', 
@@ -492,11 +492,26 @@ export default function IdentityPanel() {
               borderRadius: '0.5rem',
               border: '1px solid var(--card-border-accent)'
             }}>
-              <div style={{ flex: 1, wordBreak: 'break-all', fontSize: '0.9rem', color: 'var(--accent-light)' }}>
-                <strong>DID:</strong> did:stellar:{resolvedAddress}
+              <div
+                style={{ flex: 1, wordBreak: 'break-all', fontSize: '0.9rem' }}
+                title={`did:stellar:${resolvedAddress}`}
+              >
+                <span style={{ color: 'var(--text-muted)', fontWeight: 400 }}>did:stellar:</span>
+                <span
+                  className="did-identifier"
+                  style={{ color: 'var(--accent-light)', fontWeight: 700 }}
+                >
+                  {/* Full address — hidden on mobile via CSS, shown on desktop */}
+                  <span className="did-identifier-full">{resolvedAddress}</span>
+                  {/* Truncated address — shown on mobile, hidden on desktop */}
+                  <span className="did-identifier-short">
+                    {`${resolvedAddress.slice(0, 8)}…${resolvedAddress.slice(-4)}`}
+                  </span>
+                </span>
               </div>
               <button
                 onClick={handleCopyDid}
+                aria-label="Copy full DID to clipboard"
                 style={{
                   padding: '0.4rem 0.8rem',
                   fontSize: '0.85rem',
@@ -510,7 +525,6 @@ export default function IdentityPanel() {
                 {copied ? '✓ Copied!' : '📋 Copy'}
               </button>
             </div>
-            <pre className="result">{resolveResult}</pre>
             {resolvedDoc && (
               <div style={{ fontSize: '0.8rem', color: 'var(--text-muted)', marginTop: '0.5rem', lineHeight: 1.6 }}>
                 <span><strong>Created:</strong> {formatTimestamp(resolvedDoc.createdAt)}</span>
@@ -582,7 +596,7 @@ export default function IdentityPanel() {
           </div>
         )}
 
-        {!reputationLoading && resolveResult && !reputation && (
+        {!reputationLoading && resolvedAddress && !reputation && (
           <div
             className="card"
             style={{ marginTop: '1rem', background: 'var(--card-bg-accent)', border: '1px solid var(--border-input)' }}
