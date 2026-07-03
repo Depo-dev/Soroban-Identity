@@ -760,10 +760,10 @@ export class CredentialClient extends BaseClient {
       throw contractErr;
     }
 
-    return scValToNative(
+    return decodeCredential(
       (result as SorobanRpc.Api.SimulateTransactionSuccessResponse)
         .result!.retval
-    ) as Credential;
+    );
   }
 
   /**

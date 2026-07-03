@@ -5,6 +5,7 @@ import type {
   ReputationRecord,
   ScoreHistoryEntry,
 } from "./types";
+import { assertCredentialType } from "./types";
 
 export function encodeAddress(address: string): xdr.ScVal {
   if (!address) throw new Error("encodeAddress: address must be non-empty");
@@ -66,10 +67,15 @@ export function decodeDidDocument(val: xdr.ScVal): DidDocument {
 
 export function decodeCredential(val: xdr.ScVal): Credential {
   const result = scValToNative(val);
-  if (result == null || typeof result !== "object") {
+  if (result == null || typeof result !== "object" || Array.isArray(result)) {
     throw new Error("decodeCredential: malformed ScVal");
   }
-  return result as Credential;
+
+  const credential = result as Record<string, unknown>;
+  return {
+    ...credential,
+    credentialType: assertCredentialType(credential.credentialType),
+  } as Credential;
 }
 
 export function decodeReputationRecord(val: xdr.ScVal): ReputationRecord {

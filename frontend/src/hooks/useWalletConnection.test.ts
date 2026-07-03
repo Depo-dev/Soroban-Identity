@@ -39,11 +39,17 @@ describe("useWalletConnection", () => {
   };
 
   beforeEach(() => {
+    localStorage.clear();
     setState = vi.fn((fn) => {
       if (typeof fn === "function") {
         return fn(DISCONNECTED_STATE);
       }
       return fn;
+    });
+    Object.defineProperty(window, "freighter", {
+      value: mockFreighter,
+      writable: true,
+      configurable: true,
     });
     vi.clearAllMocks();
     vi.useFakeTimers();
@@ -52,6 +58,8 @@ describe("useWalletConnection", () => {
   afterEach(() => {
     vi.runOnlyPendingTimers();
     vi.useRealTimers();
+    localStorage.clear();
+    delete (window as Window & { freighter?: unknown }).freighter;
   });
 
   describe("Successful connection on first attempt", () => {
@@ -259,6 +267,33 @@ describe("useWalletConnection", () => {
       );
 
       consoleSpy.mockRestore();
+    });
+  });
+
+  describe("Freighter availability", () => {
+    it("should surface a friendly error when Freighter is not installed", async () => {
+      Object.defineProperty(window, "freighter", {
+        value: undefined,
+        writable: true,
+        configurable: true,
+      });
+
+      const { result } = renderHook(() =>
+        useWalletConnection({
+          networkConfig: mockNetworkConfig,
+          setState,
+          maxRetries: 3,
+          retryDelayMs: 1500,
+        }),
+      );
+
+      await act(async () => {
+        await result.current.connect("freighter");
+      });
+
+      expect(result.current.isConnecting).toBe(false);
+      expect(result.current.error).toMatch(/Freighter wallet extension not found/i);
+      expect(setState).toHaveBeenCalled();
     });
   });
 
