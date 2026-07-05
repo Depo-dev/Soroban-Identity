@@ -70,7 +70,7 @@ export function useWalletConnection({
       }
 
       if (!window.freighter) {
-        const errorMsg = "Freighter not found. Install it from freighter.app";
+        const errorMsg = "Freighter wallet extension not found. Install it from freighter.app";
         setState((s) => ({
           ...s,
           connecting: false,

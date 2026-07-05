@@ -39,6 +39,7 @@ export {
   classifyError,
   wrapError,
 } from './errors';
+export { UnknownCredentialTypeError, assertCredentialType } from './types';
 export type {
   SorobanErrorCode,
   SorobanIdentityErrorInit,

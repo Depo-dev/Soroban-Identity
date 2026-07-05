@@ -45,11 +45,28 @@ export interface DidDocument {
   services: ServiceEndpoint[];
 }
 
+const VALID_CREDENTIAL_TYPES = ["Kyc", "Reputation", "Achievement", "Custom"] as const;
+
 /**
  * Credential category recognised by the credential-manager contract.
  * `Custom` is the catch-all for application-defined types.
  */
-export type CredentialType = "Kyc" | "Reputation" | "Achievement" | "Custom";
+export type CredentialType = (typeof VALID_CREDENTIAL_TYPES)[number];
+
+export class UnknownCredentialTypeError extends Error {
+  constructor(value: unknown) {
+    super(`UnknownCredentialTypeError: unexpected credential type "${String(value)}"`);
+    this.name = "UnknownCredentialTypeError";
+  }
+}
+
+export function assertCredentialType(value: unknown): CredentialType {
+  if (typeof value === "string" && VALID_CREDENTIAL_TYPES.includes(value as CredentialType)) {
+    return value as CredentialType;
+  }
+
+  throw new UnknownCredentialTypeError(value);
+}
 
 /**
  * On-chain credential record returned by
