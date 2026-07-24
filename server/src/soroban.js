@@ -187,8 +187,13 @@ export class SorobanClient {
   }
 
   /** Gracefully drain the worker pool before shutdown. */
-  drain() {
-    return this.pool.drain();
+  async drain() {
+    if (this.pool) {
+      await this.pool.drain();
+    }
+    if (this.pollerIntervalId) {
+      clearInterval(this.pollerIntervalId);
+    }
   }
 }
 
