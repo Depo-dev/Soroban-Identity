@@ -1,5 +1,6 @@
 import { spawn } from 'node:child_process';
 import { RpcCache } from './rpc-cache.js';
+import { CircuitBreaker } from './circuit-breaker.js';
 import { logger } from './logger.js';
 
 export class SorobanError extends Error {
@@ -25,6 +26,11 @@ export class SorobanClient {
     this.config = config;
     this.metrics = metrics;
     this.cache = new RpcCache(config.rpcCacheTtlMs);
+    this.circuitBreaker = new CircuitBreaker({
+      failureThreshold: 5,
+      successThreshold: 2,
+      openDurationMs: 30_000,
+    });
 
     let interval = this.config.eventPollIntervalMs;
     if (interval !== 0) {
