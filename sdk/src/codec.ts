@@ -36,15 +36,19 @@ export function encodeU32(value: number): xdr.ScVal {
   return nativeToScVal(value, { type: "u32" });
 }
 
-export function encodeU64(value: number): xdr.ScVal {
-  if (!Number.isInteger(value) || value < 0) {
+export function encodeU64(value: number | bigint): xdr.ScVal {
+  if (typeof value === "bigint") {
+    if (value < 0n) {
+      throw new Error("encodeU64: expected a non-negative integer");
+    }
+  } else if (!Number.isInteger(value) || value < 0) {
     throw new Error("encodeU64: expected a non-negative integer");
   }
   return nativeToScVal(value, { type: "u64" });
 }
 
-export function encodeI64(value: number): xdr.ScVal {
-  if (!Number.isInteger(value)) {
+export function encodeI64(value: number | bigint): xdr.ScVal {
+  if (typeof value === "number" && !Number.isInteger(value)) {
     throw new Error("encodeI64: expected an integer");
   }
   return nativeToScVal(value, { type: "i64" });

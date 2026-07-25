@@ -22,7 +22,7 @@ export class SorobanTransactionBuilder {
   constructor(account: Account, config: SorobanIdentityConfig) {
     this.account = account;
     this.config = config;
-    this.fee = 100; // BASE_FEE in stroops
+    this.fee = parseInt(BASE_FEE, 10);
   }
 
   /**
