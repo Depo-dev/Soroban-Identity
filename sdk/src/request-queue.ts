@@ -115,14 +115,14 @@ export class RequestQueue {
       request.resolve(result);
     } catch (error: any) {
       if (this.shouldRetry(error, request)) {
+        const delay = this.getRetryDelay(error, request.retries);
         request.retries++;
-        const delay = this.getRetryDelay(error);
         setTimeout(() => {
           this.queue.unshift(request);
           this.processQueue();
         }, delay);
       } else if (this.is429(error)) {
-        request.reject(new RateLimitError(this.getRetryDelay(error)));
+        request.reject(new RateLimitError(this.getRetryDelay(error, request.retries)));
       } else {
         request.reject(error);
       }
@@ -150,7 +150,7 @@ export class RequestQueue {
     );
   }
 
-  private getRetryDelay(error: any): number {
+  private getRetryDelay(error: any, retries: number): number {
     // Honor a real Retry-After header from the server response, if present
     const retryAfter = this.extractRetryAfterHeader(error);
     if (retryAfter != null) {
@@ -161,7 +161,7 @@ export class RequestQueue {
     }
 
     // Exponential backoff for other errors
-    return this.retryDelay * Math.pow(2, Math.min(3, error.retries || 0));
+    return this.retryDelay * Math.pow(2, Math.min(3, retries));
   }
 
   /**
