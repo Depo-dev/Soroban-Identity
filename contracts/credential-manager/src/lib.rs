@@ -16,15 +16,13 @@ const CRED: Symbol = symbol_short!("CRED");
 const SUBJECT: Symbol = symbol_short!("sub");
 const CRED_CNT: Symbol = symbol_short!("CREDCNT");
 const REVOKED_CNT: Symbol = symbol_short!("REVCNT");
+const TOTAL_ISSUED_CNT: Symbol = symbol_short!("TOTALCNT");
 const ISSUER_CREDS: Symbol = symbol_short!("ISSCREDS");
 const SCHEMA: Symbol = symbol_short!("SCHEMA");
 const IDENTITY_REGISTRY: Symbol = symbol_short!("IDREGIST");
 
 const MAX_ISSUERS: u32 = 100;
 const MAX_ISSUER_CREDS: u32 = 10_000;
-const IDENTITY_REGISTRY: Symbol = symbol_short!("IDREGIST");
-
-const MAX_ISSUERS: u32 = 100;
 const TTL_MAX: u32 = 6_312_000;
 const TTL_MIN: u32 = 17_280;
 const PAGE_CAP: u32 = 100;
@@ -247,6 +245,9 @@ impl CredentialManager {
         let cnt: u32 = env.storage().persistent().get(&cnt_key).unwrap_or(0);
         env.storage().persistent().set(&cnt_key, &(cnt + 1));
 
+        let total_issued: u32 = env.storage().instance().get(&TOTAL_ISSUED_CNT).unwrap_or(0);
+        env.storage().instance().set(&TOTAL_ISSUED_CNT, &(total_issued + 1));
+
         env.events().publish(
             (CRED, symbol_short!("issued")),
             (EVENT_VERSION, id.clone(), subject, issuer, credential_type, expires_at),
@@ -260,6 +261,9 @@ impl CredentialManager {
         let mut cred: Credential = env.storage().persistent().get(&key).ok_or(ContractError::CredentialNotFound)?;
         if cred.issuer != issuer {
             return Err(ContractError::UnauthorizedIssuer);
+        }
+        if cred.revoked {
+            return Err(ContractError::CredentialRevoked);
         }
         cred.revoked = true;
         env.storage().persistent().set(&key, &cred);
@@ -419,10 +423,11 @@ impl CredentialManager {
 
     pub fn get_storage_stats(env: Env) -> CredentialStorageStats {
         let revoked: u32 = env.storage().instance().get(&REVOKED_CNT).unwrap_or(0);
+        let total: u32 = env.storage().instance().get(&TOTAL_ISSUED_CNT).unwrap_or(0);
         CredentialStorageStats {
-            total_credentials: revoked,
+            total_credentials: total,
             revoked_credentials: revoked,
-            active_credentials: 0,
+            active_credentials: total.saturating_sub(revoked),
         }
     }
 
