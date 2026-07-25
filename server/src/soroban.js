@@ -166,12 +166,12 @@ export class SorobanClient {
   }
 
   async addIssuer(issuer) {
-    this.cache.clear();
+    this.cache.delete(`${this.config.contracts.credential}:get_issuers:[]`);
     return this.invoke(this.config.contracts.credential, 'add_issuer', ['--issuer', issuer]);
   }
 
   async removeIssuer(issuer) {
-    this.cache.clear();
+    this.cache.delete(`${this.config.contracts.credential}:get_issuers:[]`);
     return this.invoke(this.config.contracts.credential, 'remove_issuer', ['--issuer', issuer]);
   }
 

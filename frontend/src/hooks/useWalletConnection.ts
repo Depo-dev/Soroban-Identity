@@ -52,7 +52,8 @@ export function useWalletConnection({
   const retryCountRef = useRef<number>(0);
   const currentWalletTypeRef = useRef<WalletType | null>(null);
   const startTimeRef = useRef<number>(0);
-  const timeoutRef = useRef<NodeJS.Timeout | null>(null);
+  const freighterTimeoutRef = useRef<NodeJS.Timeout | null>(null);
+  const walletConnectTimeoutRef = useRef<NodeJS.Timeout | null>(null);
 
   const [isConnecting, setIsConnecting] = useState(false);
   const [error, setError] = useState<WalletConnectionError | string | null>(
@@ -163,7 +164,7 @@ export function useWalletConnection({
             retryCount: attempt,
           }));
           setRetryCount(attempt);
-          timeoutRef.current = setTimeout(async () => {
+          freighterTimeoutRef.current = setTimeout(async () => {
             await connectFreighter(true);
           }, retryDelayMs);
         }
@@ -273,7 +274,7 @@ export function useWalletConnection({
             retryCount: attempt,
           }));
           setRetryCount(attempt);
-          timeoutRef.current = setTimeout(async () => {
+          walletConnectTimeoutRef.current = setTimeout(async () => {
             await connectWalletConnect(true);
           }, retryDelayMs);
         }
@@ -303,8 +304,11 @@ export function useWalletConnection({
 
   useEffect(() => {
     return () => {
-      if (timeoutRef.current) {
-        clearTimeout(timeoutRef.current);
+      if (freighterTimeoutRef.current) {
+        clearTimeout(freighterTimeoutRef.current);
+      }
+      if (walletConnectTimeoutRef.current) {
+        clearTimeout(walletConnectTimeoutRef.current);
       }
     };
   }, []);
@@ -313,6 +317,17 @@ export function useWalletConnection({
 
   const connect = useCallback(
     async (walletType: WalletType = "freighter") => {
+      // Cancel any pending retry timer from a previously abandoned flow so
+      // it can't fire later and clobber the state this call is about to set.
+      if (freighterTimeoutRef.current) {
+        clearTimeout(freighterTimeoutRef.current);
+        freighterTimeoutRef.current = null;
+      }
+      if (walletConnectTimeoutRef.current) {
+        clearTimeout(walletConnectTimeoutRef.current);
+        walletConnectTimeoutRef.current = null;
+      }
+
       setIsConnecting(true);
       setError(null);
       setRetryCount(0);
@@ -337,8 +352,11 @@ export function useWalletConnection({
 
   const disconnect = useCallback(
     async (currentWalletType: WalletType | null) => {
-      if (timeoutRef.current) {
-        clearTimeout(timeoutRef.current);
+      if (freighterTimeoutRef.current) {
+        clearTimeout(freighterTimeoutRef.current);
+      }
+      if (walletConnectTimeoutRef.current) {
+        clearTimeout(walletConnectTimeoutRef.current);
       }
 
       if (

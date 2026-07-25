@@ -26,6 +26,10 @@ export class RpcCache {
     this.cache.set(key, { value, expiresAt: Date.now() + ttl });
   }
 
+  delete(key) {
+    this.cache.delete(key);
+  }
+
   clear() {
     this.cache.clear();
     this.hits = 0;

@@ -24,6 +24,8 @@ export function useContractEvents(filter?: ContractEventFilter) {
   const [connected, setConnected] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const sourceRef = useRef<EventSource | null>(null);
+  const filterRef = useRef(filter);
+  filterRef.current = filter;
 
   const eventsUrl = import.meta.env.VITE_EVENTS_URL ?? 'http://localhost:3001/events';
 
@@ -42,11 +44,12 @@ export function useContractEvents(filter?: ContractEventFilter) {
   }, [eventsUrl, filter?.contractId, topicKey]);
 
   const shouldIncludeEvent = useCallback((eventType: string): boolean => {
-    if (!filter?.eventTypes || filter.eventTypes.length === 0) {
+    const eventTypes = filterRef.current?.eventTypes;
+    if (!eventTypes || eventTypes.length === 0) {
       return true;
     }
-    return filter.eventTypes.includes(eventType);
-  }, [filter?.eventTypes]);
+    return eventTypes.includes(eventType);
+  }, []);
 
   useEffect(() => {
     const source = new EventSource(streamUrl);
@@ -62,7 +65,7 @@ export function useContractEvents(filter?: ContractEventFilter) {
         const parsed = JSON.parse((evt as MessageEvent).data) as StreamedContractEvent;
         if (shouldIncludeEvent(parsed.type)) {
           setEvents((prev) => [parsed, ...prev].slice(0, MAX_EVENTS));
-          filter?.onEvent?.(parsed.type, parsed);
+          filterRef.current?.onEvent?.(parsed.type, parsed);
         }
       } catch {
         // Ignore invalid payloads
@@ -83,7 +86,12 @@ export function useContractEvents(filter?: ContractEventFilter) {
       sourceRef.current = null;
       setConnected(false);
     };
-  }, [streamUrl, shouldIncludeEvent, filter?.onEvent]);
+    // shouldIncludeEvent and filterRef.current.onEvent are intentionally
+    // excluded: shouldIncludeEvent reads live filterRef state and has no
+    // dependencies, and eventTypesKey/streamUrl already capture every input
+    // that should reopen the connection.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [streamUrl, eventTypesKey]);
 
   return { events, connected, error };
 }
