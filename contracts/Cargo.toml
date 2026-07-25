@@ -1,7 +1,35 @@
+[package]
+name = "soroban-identity-contracts"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
 [workspace]
 members = [
+    ".",
+    "shared-errors",
+    "identity-registry",
+    "credential-manager",
+    "reputation",
+]
+default-members = [
+    ".",
+    "shared-errors",
     "identity-registry",
     "credential-manager",
     "reputation",
 ]
 resolver = "2"
+
+[dev-dependencies]
+credential-manager = { path = "credential-manager" }
+identity-registry = { path = "identity-registry" }
+reputation = { path = "reputation" }
+shared-errors = { path = "shared-errors" }
+soroban-sdk = { version = "21.0.0", features = ["testutils"] }
+
+[profile.release]
+opt-level = "z"
+lto = true
+codegen-units = 1
+panic = "abort"
