@@ -242,16 +242,44 @@ export class ExpiryNotificationJob {
   }
 }
 
+/**
+ * Classify events based on the contract's actual topic structure.
+ * Credential-issued events from credential-manager have topics: ["CRED", "issued"]
+ * where CRED is a Symbol short-code (represented as a string in the topic array).
+ * 
+ * @param {Object} event - Event object from Soroban RPC
+ * @returns {Object|null} Extracted credential data or null if not a credential-issued event
+ */
 export function credentialFromEvent(event) {
-  const text = JSON.stringify(event).toLowerCase();
-  if (!text.includes('cred') || !text.includes('issued')) return null;
+  // Soroban contract events have a 'topic' array with Symbol values
+  // Credential-issued events have topics: (CRED, symbol_short!("issued"))
+  // In the event structure, this becomes something like ["CRED", "issued"] or similar
+  if (!event || typeof event !== 'object') return null;
+  
+  const topic = event.topic;
+  if (!Array.isArray(topic) || topic.length < 2) return null;
+  
+  // Check if this is a credential-issued event by examining the topic
+  // The contract uses (CRED, symbol_short!("issued")) where CRED = symbol_short!("CRED")
+  // After deserialization, the topic array should contain these symbols
+  // Both should be present and in order
+  const topicStr = JSON.stringify(topic).toLowerCase();
+  const isCreditIssuedTopic = topicStr.includes('cred') && topicStr.includes('issued');
+  
+  if (!isCreditIssuedTopic) return null;
+  
+  // Extract credential data from the event value
   const value = event.value ?? event.data ?? event;
-  if (value && typeof value === 'object' && !Array.isArray(value)) {
-    const id = value.id ?? value.credential_id;
-    const subject = value.subject;
-    const issuer = value.issuer;
-    const expires_at = Number(value.expires_at);
-    if (id && subject && issuer && expires_at) return { id, subject, issuer, expires_at, source: 'event' };
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
+  
+  const id = value.id ?? value.credential_id;
+  const subject = value.subject;
+  const issuer = value.issuer;
+  const expires_at = Number(value.expires_at);
+  
+  if (id && subject && issuer && Number.isFinite(expires_at)) {
+    return { id, subject, issuer, expires_at, source: 'event' };
   }
+  
   return null;
 }
