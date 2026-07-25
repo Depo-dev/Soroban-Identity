@@ -1,6 +1,6 @@
 import { spawn } from 'node:child_process';
 import { RpcCache } from './rpc-cache.js';
-import { CircuitBreaker } from './circuit-breaker.js';
+import { CircuitBreaker, SorobanUnavailableError } from './circuit-breaker.js';
 import { logger } from './logger.js';
 
 export class SorobanError extends Error {
@@ -66,62 +66,72 @@ export class SorobanClient {
       method,
       ...args,
     ];
-    let attempt = 0;
-    while (true) {
-      const started = performance.now();
-      try {
-        const output = await runCommand(this.config.stellarCli, commandArgs, this.config.sorobanInvokeTimeoutMs);
-        this.metrics?.observeRpcLatency((performance.now() - started) / 1000);
-        return output.trim();
-      } catch (error) {
-        this.metrics?.observeRpcLatency((performance.now() - started) / 1000);
-        
-        // SorobanTimeoutError should propagate immediately without retry
-        if (error instanceof SorobanTimeoutError) {
-          throw new SorobanError('timeout', 'The operation timed out.', error.message);
-        }
-        
-        const errMsg = error.message.toLowerCase();
-        const isTransient = errMsg.includes('timeout') || errMsg.includes('429') || errMsg.includes('503') || errMsg.includes('econnreset');
-        
-        if (isTransient && attempt < this.config.rpcMaxRetries) {
-          attempt++;
-          if (this.metrics && typeof this.metrics.counters === 'object') {
-            this.metrics.counters.rpc_retries_total = (this.metrics.counters.rpc_retries_total || 0) + 1;
-          }
-          const maxDelay = this.config.rpcRetryBaseMs * Math.pow(this.config.rpcRetryBackoff, attempt);
-          const delay = Math.floor(Math.random() * maxDelay);
-          logger.warn({ 
-            attempt, 
-            maxRetries: this.config.rpcMaxRetries, 
-            method, 
-            delayMs: delay,
-            error: error.message 
-          }, 'Retrying Soroban RPC call');
-          await new Promise(r => setTimeout(r, delay));
-          continue;
-        }
 
-        let category = 'unknown_error';
-        let publicMessage = 'An unknown error occurred.';
-        
-        if (errMsg.includes('contracterror') || errMsg.includes('rejected') || errMsg.includes('panic') || errMsg.includes('trap')) {
-          category = 'contract_error';
-          publicMessage = 'The contract rejected this request.';
-        } else if (errMsg.includes('insufficient_fee') || errMsg.includes('tx_insufficient_fee')) {
-          category = 'insufficient_fee';
-          publicMessage = 'The transaction fee was insufficient.';
-        } else if (errMsg.includes('ledger_closed') || errMsg.includes('tx_bad_seq')) {
-          category = 'ledger_closed';
-          publicMessage = 'The ledger closed before the transaction could be included.';
-        } else if (isTransient) {
-          category = 'rpc_unavailable';
-          publicMessage = 'The Soroban RPC node is currently unavailable.';
+    // Wrap the RPC call with the circuit breaker to fail fast when unavailable
+    return this.circuitBreaker.call(async () => {
+      let attempt = 0;
+      while (true) {
+        const started = performance.now();
+        try {
+          const output = await runCommand(this.config.stellarCli, commandArgs, this.config.sorobanInvokeTimeoutMs);
+          this.metrics?.observeRpcLatency((performance.now() - started) / 1000);
+          return output.trim();
+        } catch (error) {
+          this.metrics?.observeRpcLatency((performance.now() - started) / 1000);
+          
+          // SorobanTimeoutError should propagate immediately without retry
+          if (error instanceof SorobanTimeoutError) {
+            throw new SorobanError('timeout', 'The operation timed out.', error.message);
+          }
+          
+          const errMsg = error.message.toLowerCase();
+          const isTransient = errMsg.includes('timeout') || errMsg.includes('429') || errMsg.includes('503') || errMsg.includes('econnreset');
+          
+          if (isTransient && attempt < this.config.rpcMaxRetries) {
+            attempt++;
+            if (this.metrics && typeof this.metrics.counters === 'object') {
+              this.metrics.counters.rpc_retries_total = (this.metrics.counters.rpc_retries_total || 0) + 1;
+            }
+            const maxDelay = this.config.rpcRetryBaseMs * Math.pow(this.config.rpcRetryBackoff, attempt);
+            const delay = Math.floor(Math.random() * maxDelay);
+            logger.warn({ 
+              attempt, 
+              maxRetries: this.config.rpcMaxRetries, 
+              method, 
+              delayMs: delay,
+              error: error.message 
+            }, 'Retrying Soroban RPC call');
+            await new Promise(r => setTimeout(r, delay));
+            continue;
+          }
+
+          let category = 'unknown_error';
+          let publicMessage = 'An unknown error occurred.';
+          
+          if (errMsg.includes('contracterror') || errMsg.includes('rejected') || errMsg.includes('panic') || errMsg.includes('trap')) {
+            category = 'contract_error';
+            publicMessage = 'The contract rejected this request.';
+          } else if (errMsg.includes('insufficient_fee') || errMsg.includes('tx_insufficient_fee')) {
+            category = 'insufficient_fee';
+            publicMessage = 'The transaction fee was insufficient.';
+          } else if (errMsg.includes('ledger_closed') || errMsg.includes('tx_bad_seq')) {
+            category = 'ledger_closed';
+            publicMessage = 'The ledger closed before the transaction could be included.';
+          } else if (isTransient) {
+            category = 'rpc_unavailable';
+            publicMessage = 'The Soroban RPC node is currently unavailable.';
+          }
+          
+          throw new SorobanError(category, publicMessage, error.message);
         }
-        
-        throw new SorobanError(category, publicMessage, error.message);
       }
-    }
+    }).catch((error) => {
+      // Convert SorobanUnavailableError from circuit breaker to SorobanError
+      if (error instanceof SorobanUnavailableError) {
+        throw new SorobanError('rpc_unavailable', 'The Soroban RPC node is currently unavailable.', error.message);
+      }
+      throw error;
+    });
   }
 
   async pingAllContracts() {
