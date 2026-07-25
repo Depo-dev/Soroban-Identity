@@ -36,3 +36,22 @@ test('metrics service renders Prometheus counters and latency histogram', () => 
   assert.match(rendered, /# TYPE soroban_rpc_call_latency_seconds histogram/);
   assert.match(rendered, /soroban_rpc_call_latency_seconds_count 1/);
 });
+
+test('metrics service increments exactly one counter per event, even when other fields contain unrelated keywords (#507)', () => {
+  const metrics = new MetricsService();
+  metrics.applyEvents([
+    {
+      topic: ['CRED', 'issued credential'],
+      // These extra fields would trip the old whole-event substring scan
+      // (credential/revoke/did/created/score/submit all appear below) even
+      // though the real event topic is only "credential issued".
+      note: 'this credential was later revoked, a DID was created, and a score was submitted',
+    },
+  ]);
+  const rendered = metrics.renderPrometheus();
+
+  assert.match(rendered, /credentials_issued_total 1/);
+  assert.match(rendered, /credentials_revoked_total 0/);
+  assert.match(rendered, /dids_created_total 0/);
+  assert.match(rendered, /reputation_scores_submitted_total 0/);
+});

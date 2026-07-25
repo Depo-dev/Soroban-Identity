@@ -21,11 +21,21 @@ export class MetricsService {
 
   applyEvents(events) {
     for (const event of events) {
-      const text = JSON.stringify(event).toLowerCase();
-      if (text.includes('did') && (text.includes('create') || text.includes('created'))) this.counters.dids_created_total += 1;
-      if (text.includes('credential') && (text.includes('issue') || text.includes('issued'))) this.counters.credentials_issued_total += 1;
-      if (text.includes('credential') && (text.includes('revoke') || text.includes('revoked'))) this.counters.credentials_revoked_total += 1;
-      if (text.includes('score') && (text.includes('submit') || text.includes('submitted'))) this.counters.reputation_scores_submitted_total += 1;
+      const [entity, action] = Array.isArray(event?.topic) ? event.topic : [];
+      const entityKey = typeof entity === 'string' ? entity.toUpperCase() : '';
+      const actionText = typeof action === 'string' ? action.toLowerCase() : '';
+
+      // Classified by the event's real topic (entity + action), mutually
+      // exclusive so a single event increments exactly one counter.
+      if (entityKey === 'DID' && actionText.includes('create')) {
+        this.counters.dids_created_total += 1;
+      } else if (entityKey === 'CRED' && actionText.includes('issue')) {
+        this.counters.credentials_issued_total += 1;
+      } else if (entityKey === 'CRED' && actionText.includes('revoke')) {
+        this.counters.credentials_revoked_total += 1;
+      } else if (entityKey === 'SCORE' && actionText.includes('submit')) {
+        this.counters.reputation_scores_submitted_total += 1;
+      }
     }
   }
 
