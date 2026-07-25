@@ -307,11 +307,22 @@ export interface DlqWriter {
   write(record: DlqRecord): Promise<void>;
 }
 
+// deliveryId is used verbatim in a filesystem path — restrict it to a safe
+// charset so a caller-suppliable value can't traverse out of `dlqPath`
+// (e.g. `../../etc/passwd`).
+const SAFE_DELIVERY_ID = /^[A-Za-z0-9_-]+$/;
+
 /** Default DLQ writer: appends one JSON record per line to `<dlqPath>/<deliveryId>.json`. */
 export class FileDlqWriter implements DlqWriter {
   constructor(private readonly dlqPath: string = process.env.WEBHOOK_DLQ_PATH ?? "./dlq") {}
 
   async write(record: DlqRecord): Promise<void> {
+    if (!SAFE_DELIVERY_ID.test(record.deliveryId)) {
+      throw new SorobanIdentityError("deliveryId contains unsafe characters", {
+        code: "INVALID_INPUT",
+        details: { deliveryId: record.deliveryId },
+      });
+    }
     const { mkdir, writeFile } = await import("node:fs/promises");
     await mkdir(this.dlqPath, { recursive: true });
     const file = `${this.dlqPath}/${record.deliveryId}.json`;

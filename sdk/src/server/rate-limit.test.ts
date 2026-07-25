@@ -74,6 +74,23 @@ describe("TokenBucketRateLimiter (#254)", () => {
     });
     expect(limiter.consume("vip", "read").limit).toBe(100);
   });
+
+  it("gives mutually consistent resetAt and retryAfterMs on a 429 (#508)", () => {
+    let now = 1_000;
+    const limiter = new TokenBucketRateLimiter({
+      read: { limit: 2, windowMs: 1000 },
+      now: () => now,
+    });
+    limiter.consume("k", "read");
+    limiter.consume("k", "read");
+    const denied = limiter.consume("k", "read");
+    expect(denied.allowed).toBe(false);
+    expect(denied.retryAfterMs).toBeGreaterThan(0);
+    // resetAt (epoch seconds) must describe the same wait as retryAfterMs —
+    // i.e. resolve to `now + retryAfterMs`, not a separate sliding-window value.
+    const expectedResetAt = Math.ceil((now + denied.retryAfterMs) / 1000);
+    expect(denied.resetAt).toBe(expectedResetAt);
+  });
 });
 
 describe("createRateLimitMiddleware", () => {

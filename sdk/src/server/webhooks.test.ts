@@ -1,11 +1,16 @@
 import { describe, it, expect, vi } from "vitest";
+import { mkdtemp, readdir, rm, access } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import {
+  FileDlqWriter,
   InMemoryWebhookStore,
   WebhookDispatcher,
   WEBHOOK_HEADERS,
   registerWebhook,
   signPayload,
   verifySignature,
+  type DlqRecord,
   type FetchLike,
 } from "./webhooks";
 
@@ -171,5 +176,44 @@ describe("WebhookDispatcher", () => {
     );
     expect(result.ok).toBe(true);
     expect(result.attempts[0].error).toMatch(/ECONNREFUSED/);
+  });
+});
+
+describe("FileDlqWriter (#505)", () => {
+  function makeRecord(deliveryId: string): DlqRecord {
+    return {
+      deliveryId,
+      webhookId: "w1",
+      url: "https://hook.test",
+      event: "credential.issued",
+      payload: {},
+      attempts: [],
+      failedAt: 0,
+    };
+  }
+
+  it("rejects a path-traversal deliveryId instead of escaping dlqPath", async () => {
+    const dlqPath = await mkdtemp(join(tmpdir(), "dlq-test-"));
+    try {
+      const writer = new FileDlqWriter(dlqPath);
+      await expect(writer.write(makeRecord("../../etc/passwd"))).rejects.toThrow(/unsafe characters/);
+      // Nothing escaped into the parent directories, and nothing was written
+      // inside dlqPath either.
+      await expect(access(join(dlqPath, "..", "..", "etc", "passwd"))).rejects.toThrow();
+      expect(await readdir(dlqPath)).toHaveLength(0);
+    } finally {
+      await rm(dlqPath, { recursive: true, force: true });
+    }
+  });
+
+  it("writes a normal deliveryId to <dlqPath>/<deliveryId>.json", async () => {
+    const dlqPath = await mkdtemp(join(tmpdir(), "dlq-test-"));
+    try {
+      const writer = new FileDlqWriter(dlqPath);
+      await writer.write(makeRecord("abc-123_XYZ"));
+      expect(await readdir(dlqPath)).toEqual(["abc-123_XYZ.json"]);
+    } finally {
+      await rm(dlqPath, { recursive: true, force: true });
+    }
   });
 });
