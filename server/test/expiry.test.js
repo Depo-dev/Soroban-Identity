@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { findExpiringCredentials, paginate, buildExpiryIndex, ExpiryNotificationJob, credentialFromEvent } from '../src/expiry.js';
+import { readExpiryWatermark, writeExpiryWatermark } from '../src/storage.js';
 
 test('findExpiringCredentials returns credentials inside the warning window', () => {
   const now = new Date('2026-01-01T00:00:00Z');
@@ -207,4 +208,81 @@ test('credentialFromEvent — requires all credential fields to be present', () 
   
   const result = credentialFromEvent(incompleteEvent);
   assert.strictEqual(result, null, 'Should reject events with missing required fields');
+});
+
+
+test('expiry watermark — persists and survives process restart', async () => {
+  // Simulate watermark persistence across restarts.
+  // This test verifies that:
+  // 1. Watermark is persisted after scanning events
+  // 2. On restart, the persisted watermark is loaded instead of starting fresh
+  // 3. The scanner resumes from the last processed ledger
+  
+  const testDataDir = '/tmp/expiry-test-' + Date.now();
+  const config = {
+    expiryJobIntervalMs: 1000,
+    expiryWarningDays: 7,
+    subjectNotificationWebhooks: {},
+    notificationWebhookUrl: null,
+    dataDir: testDataDir,
+    credentialStorePath: testDataDir + '/credentials.json',
+    auditLogPath: testDataDir + '/audit.log',
+  };
+
+  // Simulate first run: process events up to ledger 100
+  const initialNextLedger = 42;
+  await writeExpiryWatermark(config, initialNextLedger);
+  
+  // Verify it was written
+  const readBack = await readExpiryWatermark(config);
+  assert.strictEqual(readBack, initialNextLedger, 'Watermark should be persisted and readable');
+  
+  // Simulate process restart: create new job instance
+  // The new instance should load the persisted watermark in loadWatermark()
+  const job = new ExpiryNotificationJob(config);
+  assert.strictEqual(job.nextLedger, 0, 'Initially, nextLedger is set to default from env');
+  
+  // Load the persisted watermark (this is called on startup)
+  await job.loadWatermark();
+  assert.strictEqual(job.nextLedger, initialNextLedger, 'After loadWatermark, nextLedger should be restored from disk');
+  
+  // Simulate processing more events and updating the watermark
+  const newNextLedger = 150;
+  job.nextLedger = newNextLedger;
+  await job.persistWatermark();
+  
+  // Verify persistence
+  const finalRead = await readExpiryWatermark(config);
+  assert.strictEqual(finalRead, newNextLedger, 'Updated watermark should persist');
+  
+  // Simulate another restart
+  const job2 = new ExpiryNotificationJob(config);
+  await job2.loadWatermark();
+  assert.strictEqual(job2.nextLedger, newNextLedger, 'Second restart should load the updated watermark');
+});
+
+test('expiry watermark — uses default start ledger when no watermark exists', async () => {
+  const testDataDir = '/tmp/expiry-test-fresh-' + Date.now();
+  const config = {
+    expiryJobIntervalMs: 1000,
+    expiryWarningDays: 7,
+    subjectNotificationWebhooks: {},
+    notificationWebhookUrl: null,
+    dataDir: testDataDir,
+    credentialStorePath: testDataDir + '/credentials.json',
+    auditLogPath: testDataDir + '/audit.log',
+  };
+
+  // Try to read watermark from non-existent directory
+  const watermark = await readExpiryWatermark(config);
+  assert.strictEqual(watermark, null, 'Should return null when watermark does not exist');
+  
+  // Job should use the default start ledger
+  const job = new ExpiryNotificationJob(config);
+  const initialValue = job.nextLedger;
+  assert.ok(Number.isFinite(initialValue), 'Initial nextLedger should be a valid number');
+  
+  // After loadWatermark with no persisted file, it should stay the same
+  await job.loadWatermark();
+  assert.strictEqual(job.nextLedger, initialValue, 'Should keep default when watermark does not exist');
 });

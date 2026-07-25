@@ -48,14 +48,15 @@ export async function writeAtomic(filePath, data) {
   // Step 1: Write to temporary file
   await fs.writeFile(tempPath, data, 'utf8');
   
-  // Step 2: Ensure the file is fully flushed
-  // Node.js fs.writeFile with 'utf8' encoding does sync write, but we'll
-  // explicitly fsync to ensure durability
-  const tempFile = await fs.open(tempPath, 'r');
-  try {
-    await tempFile.sync();
-  } finally {
-    await tempFile.close();
+  // Step 2: Attempt to ensure the file is fully flushed (fsync on Unix)
+  // Skip fsync on Windows where it may fail with EPERM
+  if (process.platform !== 'win32') {
+    const tempFile = await fs.open(tempPath, 'r');
+    try {
+      await tempFile.sync();
+    } finally {
+      await tempFile.close();
+    }
   }
   
   // Step 3: Atomically rename
@@ -303,4 +304,54 @@ export function createCredential(credentials, credential) {
     throw new DuplicateCredentialError(credential.id);
   }
   return [...credentials, credential];
+}
+
+// ── Expiry scanner watermark persistence ──────────────────────────────────────
+/**
+ * Get the path where the expiry watermark is stored.
+ * 
+ * @param {Object} config - Configuration object with dataDir
+ * @returns {string} Path to the watermark file
+ */
+export function getExpiryWatermarkPath(config) {
+  return path.join(config.dataDir, 'expiry-watermark.json');
+}
+
+/**
+ * Read the persisted expiry watermark (next ledger to scan).
+ * Returns null if the watermark file doesn't exist.
+ * 
+ * @param {Object} config - Configuration object
+ * @returns {Promise<number|null>} The next ledger to scan, or null if not persisted
+ */
+export async function readExpiryWatermark(config) {
+  const filePath = getExpiryWatermarkPath(config);
+  try {
+    const raw = await fs.readFile(filePath, 'utf8');
+    const parsed = JSON.parse(raw);
+    const nextLedger = Number(parsed.nextLedger);
+    if (Number.isFinite(nextLedger)) {
+      return nextLedger;
+    }
+  } catch (error) {
+    if (error.code === 'ENOENT') {
+      return null;
+    }
+    logger.warn({ error: error.message, filePath }, 'Failed to read expiry watermark, will use default');
+  }
+  return null;
+}
+
+/**
+ * Persist the expiry watermark (next ledger to scan).
+ * Uses atomic write-ahead log pattern for crash-safety.
+ * 
+ * @param {Object} config - Configuration object
+ * @param {number} nextLedger - The next ledger to scan
+ * @returns {Promise<void>}
+ */
+export async function writeExpiryWatermark(config, nextLedger) {
+  await ensureDataDir(config);
+  const filePath = getExpiryWatermarkPath(config);
+  await writeAtomic(filePath, JSON.stringify({ nextLedger }, null, 2));
 }
