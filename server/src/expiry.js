@@ -133,6 +133,31 @@ export class ExpiryNotificationJob {
     logger.info({ concurrency: this.concurrency }, 'Expiry notification job concurrency configured');
   }
 
+  /**
+   * Load the persisted watermark on startup.
+   * If persisted watermark exists, it takes precedence over EXPIRY_EVENTS_START_LEDGER.
+   * 
+   * @returns {Promise<void>}
+   */
+  async loadWatermark() {
+    const { readExpiryWatermark } = await import('./storage.js');
+    const persistedLedger = await readExpiryWatermark(this.config);
+    if (persistedLedger !== null) {
+      logger.info({ persistedLedger, previousDefault: this.nextLedger }, 'Loaded persisted expiry watermark');
+      this.nextLedger = persistedLedger;
+    }
+  }
+
+  /**
+   * Persist the current watermark to storage.
+   * 
+   * @returns {Promise<void>}
+   */
+  async persistWatermark() {
+    const { writeExpiryWatermark } = await import('./storage.js');
+    await writeExpiryWatermark(this.config, this.nextLedger);
+  }
+
   start() {
     if (this.timer) return;
     this.runOnce().catch((error) => logger.error({ error: error.message, stack: error.stack }, 'Expiry job failed'));
@@ -154,6 +179,7 @@ export class ExpiryNotificationJob {
     // Always persist credentials, even if none are expiring
     if (expiring.length === 0) {
       await writeCredentials(this.config, credentials);
+      await this.persistWatermark();
       return 0;
     }
     
@@ -200,6 +226,7 @@ export class ExpiryNotificationJob {
     }
     
     await writeCredentials(this.config, updated);
+    await this.persistWatermark();
     
     logger.info({ 
       total: expiring.length,
