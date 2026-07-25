@@ -193,8 +193,11 @@ export class SorobanClient {
 }
 
 function runCommand(command, args, timeoutMs) {
+  // Declare child outside the Promise executor to avoid temporal dead zone
+  let child;
+  
   const commandPromise = new Promise((resolve, reject) => {
-    const child = spawn(command, args, { stdio: ['ignore', 'pipe', 'pipe'] });
+    child = spawn(command, args, { stdio: ['ignore', 'pipe', 'pipe'] });
     const stdoutChunks = [];
     const stderrChunks = [];
     child.stdout.on('data', (chunk) => stdoutChunks.push(chunk));
@@ -206,17 +209,14 @@ function runCommand(command, args, timeoutMs) {
       if (code === 0) resolve(stdout);
       else reject(new Error(`command failed: ${stderr || stdout || `exit code ${code}`}`));
     });
-    
-    // Store child reference for timeout handler
-    commandPromise.child = child;
   });
   
   const timeoutPromise = new Promise((_, reject) => {
     setTimeout(() => {
       // Kill the child process with SIGKILL
-      if (commandPromise.child && !commandPromise.child.killed) {
+      if (child && !child.killed) {
         logger.warn({ timeoutMs, command }, 'Killing Soroban CLI process after timeout');
-        commandPromise.child.kill('SIGKILL');
+        child.kill('SIGKILL');
       }
       reject(new SorobanTimeoutError(timeoutMs));
     }, timeoutMs);
@@ -229,3 +229,5 @@ function parseAddressList(raw) {
   const matches = raw.match(/G[A-Z0-9]{55}/g);
   return matches ? [...new Set(matches)] : [];
 }
+
+export { runCommand };
