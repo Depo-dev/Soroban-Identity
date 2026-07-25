@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { spawn } from 'node:child_process';
-import { validateConfig } from '../src/config.js';
+import { validateConfig, loadConfig } from '../src/config.js';
 
 test('validateConfig directly: empty env returns validation errors', () => {
   const result = validateConfig({});
@@ -130,4 +130,40 @@ test('Integration: invalid SOROBAN_INVOKE_TIMEOUT_MS value exits 1', async () =>
 
   assert.equal(result.code, 1);
   assert.ok(result.stderr.includes('SOROBAN_INVOKE_TIMEOUT_MS'));
+});
+
+test('loadConfig — recognizes RPC_URL as fallback when STELLAR_RPC_URL is not set', () => {
+  const customRpcUrl = 'https://custom-rpc.example.com';
+  const config = loadConfig({
+    RPC_URL: customRpcUrl,
+  });
+  
+  assert.strictEqual(config.rpcUrl, customRpcUrl, 'loadConfig should use RPC_URL when STELLAR_RPC_URL is not set');
+});
+
+test('loadConfig — prioritizes STELLAR_RPC_URL over RPC_URL', () => {
+  const stellarRpcUrl = 'https://stellar-rpc.example.com';
+  const rpcUrl = 'https://rpc.example.com';
+  const config = loadConfig({
+    STELLAR_RPC_URL: stellarRpcUrl,
+    RPC_URL: rpcUrl,
+  });
+  
+  assert.strictEqual(config.rpcUrl, stellarRpcUrl, 'loadConfig should prioritize STELLAR_RPC_URL over RPC_URL');
+});
+
+test('loadConfig — uses hardcoded default when neither RPC_URL nor STELLAR_RPC_URL is set', () => {
+  const config = loadConfig({});
+  
+  assert.strictEqual(config.rpcUrl, 'https://soroban-testnet.stellar.org', 'loadConfig should use hardcoded testnet default');
+});
+
+test('validateConfig — accepts RPC_URL as valid alternative to STELLAR_RPC_URL', () => {
+  const result = validateConfig({
+    STELLAR_SECRET_KEY: 'SAXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX',
+    CREDENTIAL_CONTRACT_ID: 'CAXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX',
+    RPC_URL: 'https://custom-rpc.example.com',
+  });
+  
+  assert.equal(result.isValid, true, 'validateConfig should accept RPC_URL without requiring STELLAR_RPC_URL');
 });
