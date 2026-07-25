@@ -1,6 +1,7 @@
 export { IdentityClient } from "./identity";
 export { CredentialClient } from "./credentials";
 export { ReputationClient } from "./reputation";
+import type { SorobanIdentityConfig } from "./types";
 export type {
   DidDocument,
   Credential,
