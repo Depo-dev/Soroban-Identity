@@ -151,7 +151,11 @@ export class ExpiryNotificationJob {
     credentials = await this.indexCredentialEvents(credentials);
     const expiring = findExpiringCredentials(credentials, { windowDays: this.config.expiryWarningDays });
     
-    if (expiring.length === 0) return 0;
+    // Always persist credentials, even if none are expiring
+    if (expiring.length === 0) {
+      await writeCredentials(this.config, credentials);
+      return 0;
+    }
     
     logger.info({ count: expiring.length, concurrency: this.concurrency }, 'Processing expiring credentials');
     
