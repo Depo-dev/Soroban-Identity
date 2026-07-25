@@ -25,7 +25,8 @@ Manages DID documents on-chain.
 | Function | Description |
 |---|---|
 | `initialize(admin)` | One-time setup |
-| `transfer_admin(current_admin, new_admin)` | Transfer admin rights (current admin only) |
+| `propose_admin(current_admin, proposed_admin)` | Step 1: propose a new admin (current admin only) |
+| `accept_admin(new_admin)` | Step 2: accept a pending admin proposal (proposed admin only) |
 | `create_did(controller, metadata)` | Mint a new DID |
 | `update_did(controller, metadata)` | Update metadata |
 | `deactivate_did(controller)` | Soft-delete a DID |

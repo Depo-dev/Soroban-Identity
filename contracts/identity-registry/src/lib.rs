@@ -33,6 +33,7 @@ const EVENT_VERSION: u32 = 1;
 
 const IDENTITY: Symbol = symbol_short!("IDENTITY");
 const ADMIN: Symbol = symbol_short!("ADMIN");
+const PENDING_ADMIN: Symbol = symbol_short!("PADMIN");
 const DID_COUNT: Symbol = symbol_short!("DIDCNT");
 const TOTAL_DIDS: Symbol = symbol_short!("TOTDIDS");
 
@@ -120,33 +121,74 @@ impl IdentityRegistry {
         Ok(())
     }
 
-    /// Transfers admin rights to a new address. Only the current admin can call this.
+    /// Proposes a new admin. Only the current admin can call this. This is step
+    /// one of the two-step admin handoff — the proposed admin does not gain any
+    /// privileges until they call [`Self::accept_admin`] themselves, which
+    /// prevents accidentally handing control to an unreachable or wrong address.
+    ///
+    /// Calling this again before acceptance overwrites the pending proposal.
     ///
     /// # Arguments
     /// * `env` - The Soroban environment.
     /// * `current_admin` - The current admin address (must sign the transaction).
-    /// * `new_admin` - The address to transfer admin rights to.
+    /// * `proposed_admin` - The address to propose as the next admin.
     ///
     /// # Errors
+    /// Returns [`ContractError::NotInitialized`] if the contract has not been initialized.
     /// Returns [`ContractError::Unauthorized`] if `current_admin` does not match the stored admin address.
-    pub fn transfer_admin(
+    pub fn propose_admin(
         env: Env,
         current_admin: Address,
-        new_admin: Address,
+        proposed_admin: Address,
     ) -> Result<(), ContractError> {
         current_admin.require_auth();
         let stored: Address = env
             .storage()
             .instance()
             .get(&ADMIN)
-            .expect("not initialized");
+            .ok_or(ContractError::NotInitialized)?;
         if stored != current_admin {
-            panic!("not the admin");
+            return Err(ContractError::Unauthorized);
         }
-        env.storage().instance().set(&ADMIN, &new_admin);
+        env.storage().instance().set(&PENDING_ADMIN, &proposed_admin);
         env.events().publish(
-            (ADMIN, symbol_short!("transfer")),
-            (EVENT_VERSION, current_admin, new_admin),
+            (ADMIN, symbol_short!("propose")),
+            (EVENT_VERSION, current_admin, proposed_admin),
+        );
+        Ok(())
+    }
+
+    /// Accepts a pending admin proposal. Only the proposed address can call this,
+    /// and it must sign the transaction — this is step two of the two-step admin
+    /// handoff started by [`Self::propose_admin`].
+    ///
+    /// # Arguments
+    /// * `env` - The Soroban environment.
+    /// * `new_admin` - The proposed admin address (must sign the transaction).
+    ///
+    /// # Errors
+    /// Returns [`ContractError::NotInitialized`] if there is no pending proposal.
+    /// Returns [`ContractError::Unauthorized`] if `new_admin` does not match the pending proposal.
+    pub fn accept_admin(env: Env, new_admin: Address) -> Result<(), ContractError> {
+        new_admin.require_auth();
+        let pending: Address = env
+            .storage()
+            .instance()
+            .get(&PENDING_ADMIN)
+            .ok_or(ContractError::NotInitialized)?;
+        if pending != new_admin {
+            return Err(ContractError::Unauthorized);
+        }
+        let old_admin: Address = env
+            .storage()
+            .instance()
+            .get(&ADMIN)
+            .ok_or(ContractError::NotInitialized)?;
+        env.storage().instance().set(&ADMIN, &new_admin);
+        env.storage().instance().remove(&PENDING_ADMIN);
+        env.events().publish(
+            (ADMIN, symbol_short!("accept")),
+            (EVENT_VERSION, old_admin, new_admin),
         );
         Ok(())
     }
@@ -315,8 +357,10 @@ impl IdentityRegistry {
     /// * `env` - The Soroban environment.
     /// * `controller` - The address that owns the DID (must sign the transaction).
     ///
-    /// # Panics
-    /// Panics with `"DID not found"` if no DID exists for the given controller.
+    /// # Errors
+    /// Returns [`ContractError::DidNotFound`] if no DID exists for the given controller.
+    /// Returns [`ContractError::DidDeactivated`] if the DID is already inactive —
+    /// repeated calls are rejected rather than double-decrementing [`DID_COUNT`].
     pub fn deactivate_did(env: Env, controller: Address) -> Result<(), ContractError> {
         controller.require_auth();
 
@@ -324,13 +368,17 @@ impl IdentityRegistry {
         let key = Self::did_key(&env, &controller);
         let mut doc: DidDocument = storage.get(&key).ok_or(ContractError::DidNotFound)?;
 
+        if !doc.active {
+            return Err(ContractError::DidDeactivated);
+        }
+
         doc.active = false;
         doc.updated_at = env.ledger().timestamp();
 
         storage.set(&key, &doc);
         storage.extend_ttl(&key, TTL_LEDGERS, TTL_LEDGERS);
 
-        // Decrement DID count
+        // Decrement DID count — only reached on the active → inactive transition above.
         let count: u32 = env.storage().instance().get(&DID_COUNT).unwrap_or(0);
         if count > 0 {
             env.storage().instance().set(&DID_COUNT, &(count - 1));
@@ -618,6 +666,113 @@ mod tests {
         assert!(client.has_active_did(&user));
         client.deactivate_did(&user);
         assert!(!client.has_active_did(&user));
+    }
+
+    /// propose_admin + accept_admin must hand off control; the old admin loses
+    /// privileges and the new admin gains them.
+    #[test]
+    fn test_propose_and_accept_admin() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let contract_id = env.register_contract(None, IdentityRegistry);
+        let client = IdentityRegistryClient::new(&env, &contract_id);
+
+        let admin = Address::generate(&env);
+        let new_admin = Address::generate(&env);
+        client.initialize(&admin);
+
+        client.propose_admin(&admin, &new_admin);
+        client.accept_admin(&new_admin);
+
+        // Old admin can no longer propose a further transfer.
+        let another = Address::generate(&env);
+        let result = client.try_propose_admin(&admin, &another);
+        assert_eq!(result, Err(Ok(ContractError::Unauthorized)));
+
+        // New admin can now propose.
+        client.propose_admin(&new_admin, &another);
+    }
+
+    /// accept_admin must reject an address that was not the one proposed.
+    #[test]
+    fn test_accept_admin_wrong_caller_returns_error() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let contract_id = env.register_contract(None, IdentityRegistry);
+        let client = IdentityRegistryClient::new(&env, &contract_id);
+
+        let admin = Address::generate(&env);
+        let proposed = Address::generate(&env);
+        let attacker = Address::generate(&env);
+        client.initialize(&admin);
+
+        client.propose_admin(&admin, &proposed);
+
+        let result = client.try_accept_admin(&attacker);
+        assert_eq!(result, Err(Ok(ContractError::Unauthorized)));
+    }
+
+    /// accept_admin with no pending proposal must return NotInitialized.
+    #[test]
+    fn test_accept_admin_no_pending_proposal_returns_error() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let contract_id = env.register_contract(None, IdentityRegistry);
+        let client = IdentityRegistryClient::new(&env, &contract_id);
+
+        let admin = Address::generate(&env);
+        client.initialize(&admin);
+
+        let someone = Address::generate(&env);
+        let result = client.try_accept_admin(&someone);
+        assert_eq!(result, Err(Ok(ContractError::NotInitialized)));
+    }
+
+    /// propose_admin from a non-admin address must return Unauthorized.
+    #[test]
+    fn test_propose_admin_unauthorized_returns_error() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let contract_id = env.register_contract(None, IdentityRegistry);
+        let client = IdentityRegistryClient::new(&env, &contract_id);
+
+        let admin = Address::generate(&env);
+        let attacker = Address::generate(&env);
+        let target = Address::generate(&env);
+        client.initialize(&admin);
+
+        let result = client.try_propose_admin(&attacker, &target);
+        assert_eq!(result, Err(Ok(ContractError::Unauthorized)));
+    }
+
+    /// Repeated deactivate_did calls on an already-inactive DID must error and
+    /// must not decrement DID_COUNT more than once.
+    #[test]
+    fn test_repeated_deactivate_did_is_idempotent() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let contract_id = env.register_contract(None, IdentityRegistry);
+        let client = IdentityRegistryClient::new(&env, &contract_id);
+
+        let admin = Address::generate(&env);
+        client.initialize(&admin);
+
+        let user = Address::generate(&env);
+        client.create_did(&user, &Map::new(&env));
+        assert_eq!(client.get_did_count(), 1);
+
+        client.deactivate_did(&user);
+        assert_eq!(client.get_did_count(), 0);
+
+        let result = client.try_deactivate_did(&user);
+        assert_eq!(result, Err(Ok(ContractError::DidDeactivated)));
+        // DID_COUNT must still be 0, not underflowed/saturated a second time.
+        assert_eq!(client.get_did_count(), 0);
     }
 
     /// resolve_did on a deactivated DID must return DidDeactivated error.
