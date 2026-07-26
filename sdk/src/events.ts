@@ -95,13 +95,46 @@ function parseRawEvent(event: SorobanRpc.Api.EventResponse): ContractEvent | nul
         ? (scValToNative(event.value) as Record<string, unknown>)
         : {};
 
-    return { type: event.type, contractId, topic, value, ledger: event.ledger, txHash: event.txHash };
+    return {
+      type: event.type,
+      contractId,
+      topic,
+      value,
+      ledger: event.ledger,
+      txHash: event.txHash,
+      eventId: event.id,
+    };
   } catch {
     return null;
   }
 }
 
 const MAX_RECONNECT_RETRIES = 5;
+
+/** Max entries retained in a dedup set before oldest entries are evicted. */
+const MAX_SEEN_IDS = 10_000;
+
+/**
+ * Insertion-ordered dedup set that evicts its oldest entries once it grows
+ * past `maxSize`, so long-lived listeners don't leak memory unboundedly.
+ */
+class BoundedSeenSet {
+  private ids = new Set<string>();
+
+  constructor(private readonly maxSize = MAX_SEEN_IDS) {}
+
+  has(id: string): boolean {
+    return this.ids.has(id);
+  }
+
+  add(id: string): void {
+    if (this.ids.size >= this.maxSize) {
+      const oldest = this.ids.values().next().value;
+      if (oldest !== undefined) this.ids.delete(oldest);
+    }
+    this.ids.add(id);
+  }
+}
 
 export interface SubscribeOptions {
   /** Polling interval in milliseconds. Defaults to 5000. */
@@ -115,7 +148,7 @@ export interface SubscribeOptions {
  * matching event, and reconnects automatically after transient network
  * failures up to {@link MAX_RECONNECT_RETRIES} consecutive attempts.
  *
- * Duplicate events across poll cycles are suppressed via a seen-txHash set.
+ * Duplicate events across poll cycles are suppressed via a seen-eventId set.
  *
  * @param rpcUrl     Soroban RPC endpoint URL.
  * @param contractId Contract whose events to subscribe to.
@@ -144,7 +177,7 @@ export function subscribeToEvents(
 ): () => void {
   const { pollIntervalMs = 5000 } = options;
   const server = new SorobanRpc.Server(rpcUrl);
-  const seenTxHashes = new Set<string>();
+  const seenEventIds = new BoundedSeenSet();
   let lastLedger = 0;
   let reconnectAttempts = 0;
   let stopped = false;
@@ -168,10 +201,10 @@ export function subscribeToEvents(
       const events = (response.events ?? [])
         .map(parseRawEvent)
         .filter((e): e is ContractEvent => e !== null)
-        .filter((e) => !seenTxHashes.has(e.txHash));
+        .filter((e) => !seenEventIds.has(e.eventId));
 
       for (const event of events) {
-        seenTxHashes.add(event.txHash);
+        seenEventIds.add(event.eventId);
         handler(event);
       }
 
@@ -231,7 +264,7 @@ export class SorobanEventListener {
   private isRunning = false;
   private intervalId?: ReturnType<typeof setInterval>;
   private lastLedger = 0;
-  private seenEventIds = new Set<string>();
+  private seenEventIds = new BoundedSeenSet();
 
   /**
    * @param rpcUrl     Soroban RPC endpoint URL.
