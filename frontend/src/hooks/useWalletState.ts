@@ -11,6 +11,8 @@ export interface WalletState {
   networkPassphrase: string | null;
   connected: boolean;
   connecting: boolean;
+  /** True while the automatic reconnect flow (on page load) is in progress. */
+  reconnecting: boolean;
   txLoading: boolean;
   walletType: WalletType | null;
   error: string | WalletConnectionError | null;
@@ -22,6 +24,7 @@ export const DISCONNECTED_STATE: WalletState = {
   networkPassphrase: null,
   connected: false,
   connecting: false,
+  reconnecting: false,
   txLoading: false,
   walletType: null,
   error: null,

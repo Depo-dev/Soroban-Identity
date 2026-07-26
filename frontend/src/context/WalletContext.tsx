@@ -22,6 +22,7 @@ export function WalletProvider({ children }: { children: ReactNode }) {
     [
       wallet.publicKey,
       wallet.connected,
+      wallet.reconnecting,
       wallet.networkPassphrase,
       wallet.connecting,
       wallet.txLoading,

@@ -107,12 +107,21 @@ export function paginateCursor(items, { limit = 50, cursor = null } = {}) {
 export function paginate(items, { page = 1, pageSize = 50 } = {}) {
   const safePage = Math.max(1, Number.parseInt(page, 10) || 1);
   const safePageSize = Math.min(200, Math.max(1, Number.parseInt(pageSize, 10) || 50));
+  const totalItems = items.length;
+  const totalPages = Math.ceil(totalItems / safePageSize) || 1;
+  // Normalise to 0-based index internally so that a 1-indexed `page` param
+  // never causes the final item to appear on a phantom extra page.
   const start = (safePage - 1) * safePageSize;
+  // Clamp end to the actual array length to prevent duplicates on the last page.
+  const end = Math.min(start + safePageSize, totalItems);
+  const hasNextPage = end < totalItems;
   return {
     page: safePage,
     pageSize: safePageSize,
-    total: items.length,
-    items: items.slice(start, start + safePageSize),
+    totalItems,
+    totalPages,
+    hasNextPage,
+    items: start >= totalItems ? [] : items.slice(start, end),
   };
 }
 

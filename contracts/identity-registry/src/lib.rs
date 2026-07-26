@@ -42,6 +42,7 @@ pub enum ContractError {
     MetadataTooLarge = 9,
     NoPendingAdmin = 10,
     NotPendingAdmin = 11,
+    ServiceAlreadyExists = 12,
 }
 
 // ── Data types ────────────────────────────────────────────────────────────────
@@ -166,7 +167,8 @@ impl IdentityRegistry {
 
     /// Appends a service endpoint to an existing DID document.
     /// Returns [`ContractError::MetadataTooLarge`] when the document already has
-    /// [`MAX_SERVICES`] endpoints.
+    /// [`MAX_SERVICES`] endpoints, or [`ContractError::ServiceAlreadyExists`] when
+    /// an endpoint with the same `id` is already present.
     pub fn add_service(env: Env, controller: Address, service: ServiceEndpoint) -> Result<(), ContractError> {
         controller.require_auth();
         let storage = env.storage().persistent();
@@ -178,8 +180,14 @@ impl IdentityRegistry {
         if doc.services.len() >= MAX_SERVICES {
             return Err(ContractError::MetadataTooLarge);
         }
-        doc.services.push_back(service);
+        // Enforce id-uniqueness across existing endpoints.
+        for svc in doc.services.iter() {
+            if svc.id == service.id {
+                return Err(ContractError::ServiceAlreadyExists);
+            }
+        }
         doc.updated_at = env.ledger().timestamp();
+        doc.services.push_back(service.clone());
         storage.set(&key, &doc);
         storage.extend_ttl(&key, TTL_LEDGERS, TTL_LEDGERS);
         env.events().publish((IDENTITY, symbol_short!("svc_add")), (EVENT_VERSION, controller, doc.updated_at));
@@ -311,27 +319,7 @@ impl IdentityRegistry {
         }
     }
 
-    // ── Service endpoints (#393) ───────────────────────────────────────────────
-
-    /// Appends a service endpoint to the DID document. Returns ServiceAlreadyExists
-    /// if an endpoint with the same id is already present.
-    pub fn add_service(env: Env, controller: Address, endpoint: ServiceEndpoint) -> Result<(), ContractError> {
-        controller.require_auth();
-        let key = Self::did_key(&env, &controller);
-        let mut doc: DidDocument = env.storage().persistent().get(&key).ok_or(ContractError::DidNotFound)?;
-        if !doc.active { return Err(ContractError::DidDeactivated); }
-        for svc in doc.services.iter() {
-            if svc.id == endpoint.id { return Err(ContractError::ServiceAlreadyExists); }
-        }
-        doc.services.push_back(endpoint.clone());
-        doc.updated_at = env.ledger().timestamp();
-        env.storage().persistent().set(&key, &doc);
-        env.storage().persistent().extend_ttl(&key, TTL_LEDGERS, TTL_LEDGERS);
-        env.events().publish((IDENTITY, symbol_short!("svc_added")), (EVENT_VERSION, controller, endpoint.id));
-        Ok(())
-    }
-
-    /// Removes a service endpoint by id. Returns DidNotFound if the id is absent.
+    // ── Service endpoints ─────────────────────────────────────────────────────
     pub fn remove_service(env: Env, controller: Address, service_id: String) -> Result<(), ContractError> {
         controller.require_auth();
         let key = Self::did_key(&env, &controller);
@@ -604,7 +592,7 @@ mod tests {
         assert_eq!(stats.active_dids, 1);
     }
 
-    // ── Service endpoint tests (#393) ─────────────────────────────────────────
+    // ── Service endpoint tests (#393 / #460) ────────────────────────────────
 
     fn make_endpoint(env: &Env, id: &str) -> ServiceEndpoint {
         ServiceEndpoint {
@@ -632,6 +620,61 @@ mod tests {
 
         // Verify DID is still active
         assert!(client.has_active_did(&user));
+    }
+
+    /// Regression for #460: adding an endpoint with a duplicate id must return
+    /// ServiceAlreadyExists (previously this variant was missing from the enum).
+    #[test]
+    fn test_add_service_duplicate_id_returns_error() {
+        let (env, client) = setup();
+        let user = Address::generate(&env);
+        client.create_did(&user, &Map::new(&env));
+
+        let ep = make_endpoint(&env, "messaging-1");
+        client.add_service(&user, &ep);
+
+        // Second add with the same id must fail.
+        let result = client.try_add_service(&user, &ep);
+        assert_eq!(result, Err(Ok(ContractError::ServiceAlreadyExists)));
+    }
+
+    /// Regression for #460: both MAX_SERVICES cap and id-uniqueness are enforced
+    /// by the single merged add_service implementation.
+    #[test]
+    fn test_add_service_enforces_both_max_cap_and_uniqueness() {
+        let (env, client) = setup();
+        let user = Address::generate(&env);
+        client.create_did(&user, &Map::new(&env));
+
+        // Fill up to MAX_SERVICES using unique ids.
+        for i in 0..MAX_SERVICES {
+            let mut id_bytes = [b'e', b'0', b'0'];
+            id_bytes[1] = b'0' + (i / 10) as u8;
+            id_bytes[2] = b'0' + (i % 10) as u8;
+            let id = String::from_bytes(&env, &id_bytes);
+            client.add_service(&user, &ServiceEndpoint {
+                id: id.clone(),
+                type_: id.clone(),
+                service_endpoint: id,
+            });
+        }
+
+        // MAX_SERVICES cap is enforced.
+        let overflow = make_endpoint(&env, "overflow");
+        assert_eq!(
+            client.try_add_service(&user, &overflow),
+            Err(Ok(ContractError::MetadataTooLarge)),
+        );
+
+        // Uniqueness is enforced independently (id that already exists on a non-full doc).
+        let (env2, client2) = setup();
+        let user2 = Address::generate(&env2);
+        client2.create_did(&user2, &Map::new(&env2));
+        client2.add_service(&user2, &make_endpoint(&env2, "dup-id"));
+        assert_eq!(
+            client2.try_add_service(&user2, &make_endpoint(&env2, "dup-id")),
+            Err(Ok(ContractError::ServiceAlreadyExists)),
+        );
     }
 
     /// reactivate_did restores an active DID and increments count.

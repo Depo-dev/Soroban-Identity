@@ -7,6 +7,7 @@ export default function WalletButton() {
     connected,
     publicKey,
     connecting,
+    reconnecting,
     txLoading,
     error,
     walletType,
@@ -283,6 +284,17 @@ export default function WalletButton() {
             </div>
           )}
         </div>
+      ) : reconnecting ? (
+        // Automatic reconnect in progress — block user interaction to prevent
+        // duplicate connection attempts racing with the ongoing reconnect flow.
+        <button
+          disabled
+          aria-busy="true"
+          aria-label="Reconnecting wallet"
+          style={{ opacity: 0.7, cursor: "not-allowed" }}
+        >
+          ⟳ Reconnecting…
+        </button>
       ) : (
         <>
           <button
