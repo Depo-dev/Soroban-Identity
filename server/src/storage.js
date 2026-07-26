@@ -1,5 +1,6 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
+import crypto from 'node:crypto';
 import { requestContextStore } from './request-context.js';
 import { logger } from './logger.js';
 
@@ -43,11 +44,15 @@ export function getStorageAdapter() { return _customAdapter; }
  * @returns {Promise<void>}
  */
 export async function writeAtomic(filePath, data) {
-  const tempPath = `${filePath}.tmp`;
-  
+  // Unique suffix per call — prevents concurrent writers from clobbering
+  // each other's temp file when writeAtomic is called for the same target
+  // path simultaneously (e.g. two concurrent credential writes).
+  const suffix = crypto.randomBytes(6).toString('hex');
+  const tempPath = `${filePath}.${suffix}.tmp`;
+
   // Step 1: Write to temporary file
   await fs.writeFile(tempPath, data, 'utf8');
-  
+
   // Step 2: Attempt to ensure the file is fully flushed (fsync on Unix)
   // Skip fsync on Windows where it may fail with EPERM
   if (process.platform !== 'win32') {
@@ -58,7 +63,7 @@ export async function writeAtomic(filePath, data) {
       await tempFile.close();
     }
   }
-  
+
   // Step 3: Atomically rename
   await fs.rename(tempPath, filePath);
 }
@@ -71,37 +76,46 @@ export async function writeAtomic(filePath, data) {
  * @returns {Promise<boolean>} True if recovery was performed, false otherwise
  */
 export async function recoverOrphanedFile(filePath) {
-  const tempPath = `${filePath}.tmp`;
-  
+  // Find any orphaned temp files matching the pattern <filePath>.<hex>.tmp
+  const dir = path.dirname(filePath);
+  const base = path.basename(filePath);
+
+  let entries;
   try {
-    await fs.access(tempPath);
-    // Temporary file exists, check if canonical file exists
-    let canonicalExists = false;
-    try {
-      await fs.access(filePath);
-      canonicalExists = true;
-    } catch (error) {
-      if (error.code !== 'ENOENT') throw error;
-    }
-    
-    if (!canonicalExists) {
-      // No canonical file, rename temp to canonical
-      logger.info({ filePath, tempPath }, 'Recovering orphaned .tmp file');
-      await fs.rename(tempPath, filePath);
-      return true;
-    } else {
-      // Both files exist, keep canonical and delete temp
-      logger.info({ filePath, tempPath }, 'Cleaning up orphaned .tmp file (canonical exists)');
-      await fs.unlink(tempPath);
-      return false;
-    }
+    entries = await fs.readdir(dir);
   } catch (error) {
-    if (error.code === 'ENOENT') {
-      // No orphaned file
-      return false;
-    }
+    if (error.code === 'ENOENT') return false;
     throw error;
   }
+
+  // Match files written by the new writeAtomic: <base>.<6-hex-chars>.tmp
+  const tempPattern = new RegExp(`^${base.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\.[0-9a-f]{6}\\.tmp$`);
+  const orphans = entries.filter((e) => tempPattern.test(e));
+
+  if (orphans.length === 0) return false;
+
+  let canonicalExists = false;
+  try {
+    await fs.access(filePath);
+    canonicalExists = true;
+  } catch (error) {
+    if (error.code !== 'ENOENT') throw error;
+  }
+
+  for (const orphan of orphans) {
+    const orphanPath = path.join(dir, orphan);
+    if (!canonicalExists) {
+      // Promote the first orphan to canonical; delete the rest
+      logger.info({ filePath, orphanPath }, 'Recovering orphaned .tmp file');
+      await fs.rename(orphanPath, filePath);
+      canonicalExists = true;
+    } else {
+      logger.info({ filePath, orphanPath }, 'Cleaning up orphaned .tmp file (canonical exists)');
+      await fs.unlink(orphanPath);
+    }
+  }
+
+  return true;
 }
 
 let lastCheckedDate = null;
@@ -186,7 +200,7 @@ export async function appendAuditLog(config, entry) {
 
   // Acquire a per-file mutex so concurrent callers queue up and each write
   // lands as a complete NDJSON line rather than being interleaved.
-  const release = await _acquireAuditLock(currentLogPath);
+  const release = await _acquireFileLock(currentLogPath);
   try {
     await fs.appendFile(currentLogPath, line, 'utf8');
   } finally {
@@ -200,66 +214,49 @@ export async function appendAuditLog(config, entry) {
 // Minimal per-path mutex — no external dependencies required.
 // Each entry in the map is a Promise chain; callers append to the tail so they
 // execute one at a time for a given file path.
+// Used by both appendAuditLog and the credential read-modify-write path.
 // ---------------------------------------------------------------------------
-const _auditLocks = new Map();
+const _fileLocks = new Map();
 
 /**
  * Track the number of waiters queued per file path so we can warn if the
  * queue grows too deep (indicating a slow disk or a runaway caller).
  */
-const _auditLockDepth = new Map();
+const _fileLockDepth = new Map();
 
 /** Emit a warning when the queue depth for any single file exceeds this limit. */
-const AUDIT_LOCK_WARN_DEPTH = 1000;
+const FILE_LOCK_WARN_DEPTH = 1000;
 
 /**
  * Acquire an exclusive write lock for `filePath`.
  * Returns a release function that MUST be called (in a finally block) to
  * unblock the next waiter.
  *
- * Logs a warning when the pending queue depth for a given file path exceeds
- * AUDIT_LOCK_WARN_DEPTH (1000) to surface runaway callers or slow-disk
- * conditions before the queue grows unboundedly.
- *
  * @param {string} filePath
  * @returns {Promise<() => void>}
  */
-function _acquireAuditLock(filePath) {
-  // Retrieve (or create) the current tail of the promise chain for this path.
-  const current = _auditLocks.get(filePath) ?? Promise.resolve();
+function _acquireFileLock(filePath) {
+  const current = _fileLocks.get(filePath) ?? Promise.resolve();
 
-  // Track queue depth and warn if it grows unboundedly.
-  const depth = (_auditLockDepth.get(filePath) ?? 0) + 1;
-  _auditLockDepth.set(filePath, depth);
-  if (depth > AUDIT_LOCK_WARN_DEPTH) {
+  const depth = (_fileLockDepth.get(filePath) ?? 0) + 1;
+  _fileLockDepth.set(filePath, depth);
+  if (depth > FILE_LOCK_WARN_DEPTH) {
     console.warn(
-      `[appendAuditLog] Write queue depth for "${filePath}" is ${depth}, ` +
-        `which exceeds the warning threshold of ${AUDIT_LOCK_WARN_DEPTH}. ` +
-        'The disk may be slow or callers are overwhelming the log endpoint.',
+      `[_acquireFileLock] Write queue depth for "${filePath}" is ${depth}, ` +
+        `which exceeds the warning threshold of ${FILE_LOCK_WARN_DEPTH}. ` +
+        'The disk may be slow or callers are overwhelming this path.',
     );
   }
 
   let release;
-  // Build a new promise whose resolution is controlled by the caller.
   const next = new Promise((resolve) => {
     release = resolve;
   });
 
-  // The new tail: wait for the previous holder to finish, then let this caller
-  // proceed.  We store the unchained `next` as the new tail so the *next*
-  // caller waits for *this* caller to release.
-  _auditLocks.set(
-    filePath,
-    // Chain: when `current` resolves the next caller can enter.
-    // We keep `next` in the map (not `current.then(...)`) so that garbage
-    // collection can collect settled promises once the queue drains.
-    current.then(() => next),
-  );
+  _fileLocks.set(filePath, current.then(() => next));
 
-  // Return a promise that resolves to the release function once the previous
-  // holder has finished.  Decrement the depth counter on entry.
   return current.then(() => {
-    _auditLockDepth.set(filePath, (_auditLockDepth.get(filePath) ?? 1) - 1);
+    _fileLockDepth.set(filePath, (_fileLockDepth.get(filePath) ?? 1) - 1);
     return release;
   });
 }
@@ -291,6 +288,35 @@ export async function writeCredentials(config, credentials) {
   await ensureDataDir(config);
   await writeAtomic(config.credentialStorePath, JSON.stringify({ credentials }, null, 2));
   _credentialCacheMap.delete(path.resolve(config.credentialStorePath));
+}
+
+/**
+ * Atomically create a new credential under a per-file mutex.
+ *
+ * Callers MUST use this instead of the bare readCredentials →
+ * createCredential → writeCredentials sequence to avoid the lost-update
+ * race: two concurrent requests reading the same snapshot and each
+ * writing back only their own addition, silently discarding the other.
+ *
+ * Throws DuplicateCredentialError if a credential with the same id already
+ * exists (consistent with the pure createCredential helper).
+ *
+ * @param {object} config
+ * @param {object} credential
+ * @returns {Promise<object[]>} The updated credentials array
+ */
+export async function createAndPersistCredential(config, credential) {
+  const storePath = path.resolve(config.credentialStorePath);
+  const release = await _acquireFileLock(storePath);
+  try {
+    // Re-read inside the lock — gets the freshest state regardless of cache
+    const current = await readCredentials(config);
+    const updated = createCredential(current, credential); // throws DuplicateCredentialError
+    await writeCredentials(config, updated);
+    return updated;
+  } finally {
+    release();
+  }
 }
 
 export function upsertCredential(credentials, credential) {
