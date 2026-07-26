@@ -144,12 +144,22 @@ export async function cleanOldAuditLogs(config) {
 
 export const TTL_MS = Number(process.env.CREDENTIAL_CACHE_TTL_MS ?? 5000);
 
-let _credentialCache = null;
-let _cacheTimestamp = 0;
+/**
+ * Per-path credential cache.
+ * Keyed by the resolved credentialStorePath so that two different configs
+ * pointing at different files never share cached data.
+ *
+ * Each entry: { credentials: Array, timestamp: number }
+ */
+const _credentialCacheMap = new Map();
 
-export function clearCredentialCache() {
-  _credentialCache = null;
-  _cacheTimestamp = 0;
+export function clearCredentialCache(config) {
+  if (config?.credentialStorePath) {
+    _credentialCacheMap.delete(path.resolve(config.credentialStorePath));
+  } else {
+    // No config supplied — clear everything (used by tests that want a full reset)
+    _credentialCacheMap.clear();
+  }
 }
 
 export async function ensureDataDir(config) {
@@ -255,22 +265,23 @@ function _acquireAuditLock(filePath) {
 }
 
 export async function readCredentials(config) {
+  const storePath = path.resolve(config.credentialStorePath);
   const now = Date.now();
-  if (_credentialCache !== null && now - _cacheTimestamp < TTL_MS) {
-    return _credentialCache;
+  const cached = _credentialCacheMap.get(storePath);
+  if (cached !== undefined && now - cached.timestamp < TTL_MS) {
+    return cached.credentials;
   }
   try {
-    const raw = await fs.readFile(config.credentialStorePath, 'utf8');
+    const raw = await fs.readFile(storePath, 'utf8');
     const parsed = JSON.parse(raw);
     const credentials = Array.isArray(parsed.credentials) ? parsed.credentials : [];
-    _credentialCache = credentials;
-    _cacheTimestamp = now;
+    _credentialCacheMap.set(storePath, { credentials, timestamp: now });
     return credentials;
   } catch (error) {
     if (error.code === 'ENOENT') {
-      _credentialCache = [];
-      _cacheTimestamp = now;
-      return _credentialCache;
+      const credentials = [];
+      _credentialCacheMap.set(storePath, { credentials, timestamp: now });
+      return credentials;
     }
     throw error;
   }
@@ -279,8 +290,7 @@ export async function readCredentials(config) {
 export async function writeCredentials(config, credentials) {
   await ensureDataDir(config);
   await writeAtomic(config.credentialStorePath, JSON.stringify({ credentials }, null, 2));
-  _credentialCache = null;
-  _cacheTimestamp = 0;
+  _credentialCacheMap.delete(path.resolve(config.credentialStorePath));
 }
 
 export function upsertCredential(credentials, credential) {
