@@ -73,7 +73,11 @@ export class TokenBucketRateLimiter {
   ): { allowed: boolean; limit: number; remaining: number; resetAt: number; retryAfterMs: number } {
     const config = this.resolveConfig(key, rateClass);
     const now = this.now();
-    const bucket = this.buckets.get(key) ?? {
+    // Key includes the rate class so read and write budgets are tracked in
+    // separate buckets — a caller cannot consume read tokens to bypass the
+    // stricter write limit (Issue #478).
+    const bucketKey = `${key}:${rateClass}`;
+    const bucket = this.buckets.get(bucketKey) ?? {
       tokens: config.limit,
       lastRefillAt: now,
       config,
@@ -88,7 +92,7 @@ export class TokenBucketRateLimiter {
     }
     const allowed = bucket.tokens >= 1;
     if (allowed) bucket.tokens -= 1;
-    this.buckets.set(key, bucket);
+    this.buckets.set(bucketKey, bucket);
     this.evictStale(now, config.windowMs);
     const remaining = Math.max(0, Math.floor(bucket.tokens));
     // Both resetAt and retryAfterMs are derived from the same "time until the

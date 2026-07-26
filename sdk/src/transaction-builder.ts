@@ -104,8 +104,15 @@ export class SorobanTransactionBuilder {
   }
 
   /**
-   * Simulate a single operation and return the fee breakdown before signing.
-   * Does not prompt for a Freighter signature.
+   * Simulate the full set of accumulated operations (or a single provided
+   * operation when the builder is empty) and return the fee breakdown before
+   * signing. Does not prompt for a Freighter signature.
+   *
+   * Previously this method always built a one-operation throwaway transaction
+   * from the argument alone, completely ignoring `this.operations`. For a
+   * multi-operation builder that understated the real cost. Now the accumulated
+   * operations take precedence; the `operation` argument acts as a fallback
+   * when no operations have been added yet (Issue #477).
    */
   async estimateFee(operation: xdr.Operation): Promise<FeeEstimate> {
     const server = new SorobanRpc.Server(
@@ -115,7 +122,14 @@ export class SorobanTransactionBuilder {
       fee: BASE_FEE,
       networkPassphrase: this.config.networkPassphrase,
     });
-    builder.addOperation(operation);
+
+    // Use the accumulated operations when available so the fee estimate
+    // reflects the real multi-operation cost. Fall back to the single
+    // operation argument only when the builder has no accumulated ops.
+    const opsToEstimate = this.operations.length > 0 ? this.operations : [operation];
+    for (const op of opsToEstimate) {
+      builder.addOperation(op);
+    }
     builder.setTimeout(30);
     const tx = builder.build();
 

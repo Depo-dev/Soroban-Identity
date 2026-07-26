@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
+import { Readable } from 'node:stream';
 import test from 'node:test';
-import { validateContentType } from '../src/http-utils.js';
+import { validateContentType, readJson } from '../src/http-utils.js';
 
 function makeReq(method, contentType) {
   return { method, headers: contentType !== undefined ? { 'content-type': contentType } : {} };
@@ -61,4 +62,59 @@ test('PATCH with wrong content-type returns 415', () => {
   const res = makeRes();
   assert.equal(validateContentType(req, res), true);
   assert.equal(res._status, 415);
+});
+
+// ---------------------------------------------------------------------------
+// readJson – oversized body tests (Issue #479)
+// Verify that an oversized body returns { __payloadTooLarge: true } without
+// throwing a ReferenceError caused by the previously missing logger import.
+// ---------------------------------------------------------------------------
+
+function makeReadableStream(data) {
+  const readable = new Readable({ read() {} });
+  readable.headers = {};
+  readable.socket = { remoteAddress: '127.0.0.1' };
+  if (data !== undefined) {
+    readable.push(Buffer.from(data));
+  }
+  readable.push(null); // signal end
+  return readable;
+}
+
+const testConfig = { maxBodyBytes: 64 };
+
+// Content-Length header exceeds limit → must return __payloadTooLarge, no throw
+test('readJson returns __payloadTooLarge when Content-Length exceeds limit', async () => {
+  const body = 'x'.repeat(200);
+  const req = makeReadableStream(body);
+  req.headers = { 'content-length': String(body.length) };
+
+  let result;
+  let threw = false;
+  try {
+    result = await readJson(req, testConfig);
+  } catch {
+    threw = true;
+  }
+
+  assert.equal(threw, false, 'readJson must not throw on oversized Content-Length');
+  assert.deepEqual(result, { __payloadTooLarge: true });
+});
+
+// Streamed body exceeds limit (no Content-Length) → must return __payloadTooLarge, no throw
+test('readJson returns __payloadTooLarge when streamed body exceeds limit', async () => {
+  const body = 'x'.repeat(200);
+  const req = makeReadableStream(body);
+  // no content-length header
+
+  let result;
+  let threw = false;
+  try {
+    result = await readJson(req, testConfig);
+  } catch {
+    threw = true;
+  }
+
+  assert.equal(threw, false, 'readJson must not throw on oversized streamed body');
+  assert.deepEqual(result, { __payloadTooLarge: true });
 });

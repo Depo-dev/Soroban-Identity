@@ -211,6 +211,54 @@ describe("CORS Integration Tests", () => {
         wildcardServer.close();
       }
     });
+
+    // Issue #480: wildcard origin must NOT set Access-Control-Allow-Credentials
+    it("should NOT set Access-Control-Allow-Credentials when origin resolves to wildcard", async () => {
+      const appWithWildcard = createApp({
+        config: {
+          ...mockConfig,
+          corsAllowedOrigins: ["*"],
+        },
+        soroban: mockSoroban,
+        metrics: mockMetrics,
+        metricsAggregator: null,
+      });
+      const wildcardServer = createServer(appWithWildcard);
+      wildcardServer.listen(8769);
+
+      try {
+        const res = await makeRequest(wildcardServer, {
+          hostname: "localhost",
+          port: 8769,
+          path: "/health",
+          method: "GET",
+          headers: {
+            origin: "https://any-origin.com",
+          },
+        });
+
+        expect(res.headers["access-control-allow-origin"]).toBe("*");
+        expect(res.headers["access-control-allow-credentials"]).toBeUndefined();
+      } finally {
+        wildcardServer.close();
+      }
+    });
+
+    // Issue #480: specific (non-wildcard) origin MUST still set Allow-Credentials
+    it("should set Access-Control-Allow-Credentials when origin is a specific allowed origin", async () => {
+      const res = await makeRequest(server, {
+        hostname: "localhost",
+        port: 8765,
+        path: "/health",
+        method: "GET",
+        headers: {
+          origin: "https://app.example.com",
+        },
+      });
+
+      expect(res.headers["access-control-allow-origin"]).toBe("https://app.example.com");
+      expect(res.headers["access-control-allow-credentials"]).toBe("true");
+    });
   });
 
   describe("All route types support CORS", () => {

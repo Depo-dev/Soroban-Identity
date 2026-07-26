@@ -91,6 +91,36 @@ describe("TokenBucketRateLimiter (#254)", () => {
     const expectedResetAt = Math.ceil((now + denied.retryAfterMs) / 1000);
     expect(denied.resetAt).toBe(expectedResetAt);
   });
+
+  // Issue #478 regression: exhausting the read budget must NOT eat into the
+  // write budget — each (key, rateClass) pair gets its own independent bucket.
+  it("read and write budgets are enforced independently per caller (#478)", () => {
+    const now = 1_000;
+    const limiter = new TokenBucketRateLimiter({
+      read:  { limit: 5, windowMs: 60_000 },
+      write: { limit: 2, windowMs: 60_000 },
+      now: () => now,
+    });
+    const caller = "user-abc";
+
+    // Exhaust the entire read budget for this caller.
+    for (let i = 0; i < 5; i++) {
+      expect(limiter.consume(caller, "read").allowed).toBe(true);
+    }
+    // Read bucket is now empty.
+    expect(limiter.consume(caller, "read").allowed).toBe(false);
+
+    // Write budget must be completely intact — reads did not touch it.
+    const w1 = limiter.consume(caller, "write");
+    const w2 = limiter.consume(caller, "write");
+    expect(w1.allowed).toBe(true);
+    expect(w1.limit).toBe(2);
+    expect(w2.allowed).toBe(true);
+
+    // Only after the write limit itself is spent should writes be rejected.
+    const w3 = limiter.consume(caller, "write");
+    expect(w3.allowed).toBe(false);
+  });
 });
 
 describe("createRateLimitMiddleware", () => {

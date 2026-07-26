@@ -1,3 +1,5 @@
+import { logger } from './logger.js';
+
 /**
  * Returns true and sends 415 when the request is a non-GET/DELETE method
  * and the Content-Type is not application/json.
@@ -189,7 +191,11 @@ export function setCorsHeaders(req, res, config) {
 
   if (allowedOrigin) {
     res.setHeader("Access-Control-Allow-Origin", allowedOrigin);
-    res.setHeader("Access-Control-Allow-Credentials", "true");
+    // Per the CORS spec, credentials cannot be used with a wildcard origin.
+    // Only send the header when a specific (non-wildcard) origin is reflected.
+    if (allowedOrigin !== "*") {
+      res.setHeader("Access-Control-Allow-Credentials", "true");
+    }
   }
 
   // Add to Access-Control-Expose-Headers
