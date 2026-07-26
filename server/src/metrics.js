@@ -75,9 +75,31 @@ export class MetricsAggregator {
     this.soroban = soroban;
     this.metrics = metrics;
     this.nextLedger = startLedger;
+    /** @type {Promise<number>|null} In-flight refresh promise for single-flight dedup */
+    this._refreshPromise = null;
   }
 
-  async refresh() {
+  /**
+   * Fetch new ledger events and apply them to the metrics counters.
+   *
+   * Single-flight: if a refresh is already in progress when this method is
+   * called again (e.g. two concurrent Prometheus scrapes), the second caller
+   * receives the same Promise as the first so the same ledger range is never
+   * processed twice.
+   *
+   * @returns {Promise<number>} Number of events processed in this refresh.
+   */
+  refresh() {
+    if (this._refreshPromise !== null) {
+      return this._refreshPromise;
+    }
+    this._refreshPromise = this._doRefresh().finally(() => {
+      this._refreshPromise = null;
+    });
+    return this._refreshPromise;
+  }
+
+  async _doRefresh() {
     const events = await this.soroban.getEvents(this.nextLedger);
     this.metrics.applyEvents(events);
     const newest = events.map((event) => Number(event.ledger ?? event.ledgerClosedAt ?? 0)).filter(Number.isFinite).sort((a, b) => b - a)[0];
