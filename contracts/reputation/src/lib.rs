@@ -9,11 +9,6 @@ use soroban_sdk::{
 
 pub const CONTRACT_VERSION: u32 = 1;
 const EVENT_VERSION: u32 = 1;
-
-mod keys;
-
-pub const CONTRACT_VERSION: u32 = 1;
-const EVENT_VERSION: u32 = 1;
 const MIN_INTERVAL: u32 = 100;
 const MIN_SCORE: i64 = 0;
 const TTL_MAX: u32 = 6_312_000;
@@ -21,6 +16,8 @@ const MAX_HISTORY: usize = 50;
 const PAGE_CAP: u32 = 100;
 /// Maximum number of submissions in a single batch_submit_score call.
 pub const MAX_BATCH_SIZE: u32 = 20;
+
+mod keys;
 
 const ADMIN: Symbol = symbol_short!("ADMIN");
 const PENDING_ADMIN: Symbol = symbol_short!("PADMIN");
@@ -33,12 +30,6 @@ const HISTORY: Symbol = symbol_short!("h");
 const RATE_LIMIT: Symbol = symbol_short!("rl");
 const DISPUTE: Symbol = symbol_short!("dispute");
 const DISPUTE_CNT: Symbol = symbol_short!("disp_cnt");
-
-const MIN_INTERVAL: u32 = 100;
-const MIN_SCORE: i64 = 0;
-const TTL_MAX: u32 = 6_312_000;
-const MAX_HISTORY: usize = 50;
-const PAGE_CAP: u32 = 100;
 
 /// Ledgers a dispute remains open before it expires automatically (~1 day at 5s/ledger).
 const DISPUTE_WINDOW_LEDGERS: u32 = 17_280;
@@ -228,13 +219,7 @@ impl Reputation {
         if reason.len() > 256 {
             return Err(ContractError::ReasonTooLong);
         }
-        let rate_key = Self::rate_key(&subject, &reporter);
-        let current_ledger = env.ledger().sequence();
-        if let Some(last_ledger) = env.storage().persistent().get::<(Symbol, Address, Address), u32>(&rate_key) {
-            if current_ledger <= last_ledger + MIN_INTERVAL {
-                return Err(ContractError::RateLimitExceeded);
-            }
-        }
+        Self::check_and_set_rate_limit(&env, &subject, &reporter)?;
 
         let now = env.ledger().timestamp();
         let rec_key = Self::record_key(&subject);
@@ -487,7 +472,6 @@ impl Reputation {
         (RECORD, subject.clone())
     }
 
-    fn record_key(subject: &Address) -> (Symbol, Address) { (RECORD, subject.clone()) }
     fn history_key(subject: &Address, reporter: &Address) -> (Symbol, Address, Address) { (HISTORY, subject.clone(), reporter.clone()) }
     fn rate_key(subject: &Address, reporter: &Address) -> (Symbol, Address, Address) { (RATE_LIMIT, subject.clone(), reporter.clone()) }
 
@@ -502,6 +486,7 @@ impl Reputation {
         env.storage().persistent().extend_ttl(&rate_key, TTL_MAX, TTL_MAX);
         Ok(())
     }
+}
 
 // ── Tests ─────────────────────────────────────────────────────────────────────
 
@@ -527,7 +512,6 @@ mod tests {
         let client = ReputationClient::new(&env, &contract_id);
         assert_eq!(client.ping(), CONTRACT_VERSION);
     }
-}
 
     #[test]
     fn test_double_initialize_returns_error() {
