@@ -1,4 +1,28 @@
+import crypto from 'node:crypto';
 import { logger } from './logger.js';
+
+/**
+ * Constant-time string comparison using crypto.timingSafeEqual.
+ *
+ * Always runs in O(n) time relative to the expected value's length,
+ * regardless of whether the supplied value matches or where it first
+ * differs — preventing character-by-character timing oracle attacks.
+ *
+ * @param {string} supplied  - Value provided by the caller
+ * @param {string} expected  - Trusted reference value
+ * @returns {boolean}
+ */
+function timingSafeCompare(supplied, expected) {
+  const expectedBuf = Buffer.from(expected, 'utf8');
+  // Always allocate a buffer of the correct length and run the comparison
+  // so the timing does not reveal whether lengths matched.
+  const suppliedBuf = Buffer.alloc(expectedBuf.length);
+  Buffer.from(supplied, 'utf8').copy(suppliedBuf);
+  // Length mismatch means they cannot be equal, but we still run the
+  // constant-time comparison to avoid leaking the expected length via timing.
+  const lengthMatch = Buffer.from(supplied, 'utf8').length === expectedBuf.length;
+  return crypto.timingSafeEqual(suppliedBuf, expectedBuf) && lengthMatch;
+}
 
 /**
  * Returns true and sends 415 when the request is a non-GET/DELETE method
@@ -114,8 +138,11 @@ export function requireAuth(req, res, config, requiredScopes = []) {
   const [keyPart, scopesPart] = token.split(':');
   const keyScopes = scopesPart ? scopesPart.split(',') : [];
   
-  // Simple comparison for the admin key (backward compatible)
-  if (keyPart !== config.adminApiKey) {
+  // Constant-time API key comparison to prevent timing side-channel attacks.
+  // crypto.timingSafeEqual requires equal-length buffers — if lengths differ
+  // we still run the comparison against a dummy buffer of the correct length
+  // so the branch is not observable from timing alone.
+  if (!timingSafeCompare(keyPart, config.adminApiKey)) {
     sendJson(res, 401, { 
       error: "unauthorized",
       code: "UNAUTHORIZED",
