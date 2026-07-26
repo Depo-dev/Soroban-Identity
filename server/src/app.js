@@ -1,6 +1,6 @@
 import { URL } from "node:url";
 import crypto from "node:crypto";
-import { appendAuditLog, readCredentials, writeCredentials, createCredential, DuplicateCredentialError } from "./storage.js";
+import { appendAuditLog, readCredentials, writeCredentials, createAndPersistCredential, DuplicateCredentialError } from "./storage.js";
 import { findExpiringCredentials, paginate, paginateCursor } from "./expiry.js";
 import {
   notFound,
@@ -129,9 +129,7 @@ export function createApp({ config, soroban, metrics, metricsAggregator }) {
           if (!body.id)
             return sendJson(res, 400, { code: "INVALID_REQUEST", message: "Request body must include a credential id." });
           try {
-            const credentials = await readCredentials(config);
-            const updated = createCredential(credentials, body);
-            await writeCredentials(config, updated);
+            const updated = await createAndPersistCredential(config, body);
             await appendAuditLog(config, { action: "issue_credential", credentialId: body.id });
             return sendJson(res, 201, body);
           } catch (err) {
