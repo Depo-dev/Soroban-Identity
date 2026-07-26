@@ -293,12 +293,23 @@ export function useWalletConnection({
 
   useEffect(() => {
     const saved = localStorage.getItem("soroban-wallet-connected");
+    if (!saved) return;
+
+    // Signal the UI that an automatic reconnect is in progress so the button
+    // can show a "Reconnecting…" state instead of the misleading "Connect" label.
+    setState((s) => ({ ...s, reconnecting: true }));
+
+    const finish = () =>
+      setState((s) => ({ ...s, reconnecting: false }));
+
     if (saved === "freighter") {
-      connectFreighter();
+      connectFreighter().finally(finish);
     } else if (saved === "walletconnect") {
-      connectWalletConnect();
+      connectWalletConnect().finally(finish);
+    } else {
+      finish();
     }
-  }, [connectFreighter, connectWalletConnect]);
+  }, [connectFreighter, connectWalletConnect, setState]);
 
   // ── Cleanup ────────────────────────────────────────────────────────────────
 
@@ -377,7 +388,7 @@ export function useWalletConnection({
       }
 
       localStorage.removeItem("soroban-wallet-connected");
-      setState(DISCONNECTED_STATE);
+      setState(DISCONNECTED_STATE);  // DISCONNECTED_STATE already has reconnecting: false
       setError(null);
       setRetryCount(0);
       setIsConnecting(false);
