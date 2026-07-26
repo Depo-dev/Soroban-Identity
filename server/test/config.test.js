@@ -167,3 +167,61 @@ test('validateConfig — accepts RPC_URL as valid alternative to STELLAR_RPC_URL
   
   assert.equal(result.isValid, true, 'validateConfig should accept RPC_URL without requiring STELLAR_RPC_URL');
 });
+
+// ── Regression tests ────────────────────────────────────────────────────────
+
+// #485 — parseInteger must accept 0 for keys that use 0 as a "disabled" sentinel
+test('#485 regression: EVENT_POLL_INTERVAL_MS=0 produces 0, not the default', () => {
+  const config = loadConfig({ EVENT_POLL_INTERVAL_MS: '0' });
+  assert.strictEqual(config.eventPollIntervalMs, 0,
+    'EVENT_POLL_INTERVAL_MS=0 should be accepted as the disable sentinel, not coerced to the default');
+});
+
+test('#485 regression: RPC_MAX_RETRIES=0 produces 0, not the default', () => {
+  const config = loadConfig({ RPC_MAX_RETRIES: '0' });
+  assert.strictEqual(config.rpcMaxRetries, 0,
+    'RPC_MAX_RETRIES=0 should be accepted (disables retries), not coerced to the default');
+});
+
+test('#485 regression: SOROBAN_POOL_SIZE=0 produces 0, not the default', () => {
+  const config = loadConfig({ SOROBAN_POOL_SIZE: '0' });
+  assert.strictEqual(config.poolSize, 0,
+    'SOROBAN_POOL_SIZE=0 should be accepted (disables pool), not coerced to the default');
+});
+
+// #486 — loadConfig and validateConfig must agree on source-account precedence
+test('#486 regression: loadConfig prefers STELLAR_SOURCE_ACCOUNT over STELLAR_SECRET_KEY', () => {
+  const config = loadConfig({
+    STELLAR_SOURCE_ACCOUNT: 'SAXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX',
+    STELLAR_SECRET_KEY:     'SBYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYY',
+  });
+  assert.strictEqual(config.sourceAccount, 'SAXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX',
+    'loadConfig should prefer STELLAR_SOURCE_ACCOUNT when both are set');
+});
+
+test('#486 regression: validateConfig uses the same precedence as loadConfig (STELLAR_SOURCE_ACCOUNT wins)', () => {
+  // STELLAR_SOURCE_ACCOUNT is valid; STELLAR_SECRET_KEY is intentionally malformed.
+  // Before the fix, validateConfig would check SECRET_KEY first and return invalid.
+  // After the fix, it checks SOURCE_ACCOUNT first and should return valid.
+  const result = validateConfig({
+    STELLAR_SOURCE_ACCOUNT: 'SAXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX',
+    STELLAR_SECRET_KEY:     'not-a-valid-key',
+    CREDENTIAL_CONTRACT_ID: 'CAXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX',
+  });
+  assert.equal(result.isValid, true,
+    'validateConfig should use STELLAR_SOURCE_ACCOUNT (same precedence as loadConfig) when both vars are set');
+});
+
+test('#486 regression: loadConfig and validateConfig agree when only STELLAR_SECRET_KEY is set', () => {
+  const secretKey = 'SAXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX';
+  const config = loadConfig({ STELLAR_SECRET_KEY: secretKey });
+  assert.strictEqual(config.sourceAccount, secretKey,
+    'loadConfig falls back to STELLAR_SECRET_KEY when STELLAR_SOURCE_ACCOUNT is absent');
+
+  const result = validateConfig({
+    STELLAR_SECRET_KEY:     secretKey,
+    CREDENTIAL_CONTRACT_ID: 'CAXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX',
+  });
+  assert.equal(result.isValid, true,
+    'validateConfig should accept STELLAR_SECRET_KEY when STELLAR_SOURCE_ACCOUNT is absent');
+});
