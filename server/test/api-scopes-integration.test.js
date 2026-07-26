@@ -299,3 +299,60 @@ test('Bearer token format with scopes is supported', async () => {
     server.close();
   }
 });
+
+// ── Auth guard tests for POST /credentials (#482) ────────────────────────────
+
+test('POST /credentials with no API key returns 401', async () => {
+  const app = createApp({
+    config: mockConfig,
+    soroban: mockSoroban,
+    metrics: mockMetrics,
+  });
+
+  const server = http.createServer(app);
+  await new Promise((resolve) => server.listen(0, resolve));
+  const port = server.address().port;
+
+  try {
+    const response = await fetch(`http://localhost:${port}/credentials`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ id: 'unauth-cred', subject: 'eve' }),
+    });
+
+    assert.equal(response.status, 401, 'Unauthenticated request must be rejected with 401');
+    const body = await response.json();
+    assert.equal(body.code, 'UNAUTHORIZED');
+  } finally {
+    server.close();
+  }
+});
+
+test('POST /credentials with wrong API key returns 401', async () => {
+  const app = createApp({
+    config: mockConfig,
+    soroban: mockSoroban,
+    metrics: mockMetrics,
+  });
+
+  const server = http.createServer(app);
+  await new Promise((resolve) => server.listen(0, resolve));
+  const port = server.address().port;
+
+  try {
+    const response = await fetch(`http://localhost:${port}/credentials`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'X-API-Key': 'totally-wrong-key',
+      },
+      body: JSON.stringify({ id: 'unauth-cred-2', subject: 'mallory' }),
+    });
+
+    assert.equal(response.status, 401, 'Invalid API key must be rejected with 401');
+    const body = await response.json();
+    assert.equal(body.code, 'UNAUTHORIZED');
+  } finally {
+    server.close();
+  }
+});
