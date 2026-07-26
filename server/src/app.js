@@ -122,6 +122,7 @@ export function createApp({ config, soroban, metrics, metricsAggregator }) {
           return;
 
         if (req.method === "POST" && url.pathname === "/credentials") {
+          if (!requireAuth(req, res, config, ['credentials:write'])) return;
           if (validateContentType(req, res)) return;
           const body = await readJson(req, config);
           if (body.__payloadTooLarge)
