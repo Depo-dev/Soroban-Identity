@@ -17,7 +17,53 @@ test('findExpiringCredentials returns credentials inside the warning window', ()
 
 test('paginate caps page size and reports total', () => {
   const page = paginate([1, 2, 3, 4], { page: 2, pageSize: 2 });
-  assert.deepEqual(page, { page: 2, pageSize: 2, total: 4, items: [3, 4] });
+  assert.deepEqual(page, { page: 2, pageSize: 2, totalItems: 4, totalPages: 2, hasNextPage: false, items: [3, 4] });
+});
+
+// ── paginate boundary conditions (issue #330) ──────────────────────────────
+
+test('paginate — exact multiple: last real page contains correct items, no duplication', () => {
+  const items = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10];
+  const lastPage = paginate(items, { page: 2, pageSize: 5 });
+  assert.deepEqual(lastPage.items, [6, 7, 8, 9, 10]);
+  assert.equal(lastPage.hasNextPage, false);
+});
+
+test('paginate — page beyond end returns empty items with hasNextPage: false', () => {
+  const items = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10];
+  const beyondEnd = paginate(items, { page: 3, pageSize: 5 });
+  assert.deepEqual(beyondEnd.items, []);
+  assert.equal(beyondEnd.hasNextPage, false);
+  assert.equal(beyondEnd.totalItems, 10);
+});
+
+test('paginate — no item appears on more than one page', () => {
+  const items = Array.from({ length: 10 }, (_, i) => i + 1);
+  const seen = new Set();
+  for (let p = 1; p <= 4; p++) {
+    const { items: pageItems } = paginate(items, { page: p, pageSize: 3 });
+    for (const item of pageItems) {
+      assert.ok(!seen.has(item), `item ${item} appeared on multiple pages`);
+      seen.add(item);
+    }
+  }
+  // All 10 items should have been seen across pages 1-4
+  assert.equal(seen.size, 10);
+});
+
+test('paginate — zero items returns empty page', () => {
+  const result = paginate([], { page: 1, pageSize: 5 });
+  assert.deepEqual(result.items, []);
+  assert.equal(result.totalItems, 0);
+  assert.equal(result.totalPages, 1);
+  assert.equal(result.hasNextPage, false);
+});
+
+test('paginate — totalPages and totalItems are correct', () => {
+  const result = paginate([1, 2, 3, 4, 5], { page: 1, pageSize: 2 });
+  assert.equal(result.totalItems, 5);
+  assert.equal(result.totalPages, 3);
+  assert.equal(result.hasNextPage, true);
 });
 
 test('buildExpiryIndex — excludes credentials with no expiresAt and sorts by expires_at', () => {
