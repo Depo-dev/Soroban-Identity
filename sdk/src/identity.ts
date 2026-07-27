@@ -396,6 +396,48 @@ export class IdentityClient extends BaseClient {
     return typeof native === "boolean" ? native : Boolean(native);
   }
 
+  /**
+   * Check if an address has ever registered a DID (active or deactivated).
+   *
+   * Unlike {@link IdentityClient.hasActiveDid}, this returns `true` even for
+   * deactivated DIDs. Use this for a lightweight existence check without
+   * fetching the full document.
+   *
+   * @param controllerAddress The Stellar address to check.
+   * @param options           Per-call overrides (currently `timeoutSeconds`).
+   * @returns `true` if a DID record exists for this address, `false` otherwise.
+   * @throws {SorobanIdentityError} on simulation failure.
+   */
+  async didExists(controllerAddress: string, options?: CallOptions): Promise<boolean> {
+    validateStellarAddress(controllerAddress);
+    const account = new Account(controllerAddress, "0");
+    const timeout = options?.timeoutSeconds ?? this.config.txTimeout ?? 30;
+
+    const tx = new TransactionBuilder(account, {
+      fee: BASE_FEE,
+      networkPassphrase: this.config.networkPassphrase,
+    })
+      .addOperation(
+        this.contract.call(
+          "did_exists",
+          ...buildHasActiveDidArgs({ controller: controllerAddress })
+        )
+      )
+      .setTimeout(timeout)
+      .build();
+
+    const result = await retryWithBackoff(() => this.server.simulateTransaction(tx));
+    const isSimulationError = SorobanRpc.Api.isSimulationError(result);
+    this.debug('sdk.simulation_result', { operation: 'identity.didExists', success: !isSimulationError });
+    if (isSimulationError) return false;
+
+    const native = scValToNative(
+      (result as SorobanRpc.Api.SimulateTransactionSuccessResponse)
+        .result!.retval
+    );
+    return typeof native === "boolean" ? native : Boolean(native);
+  }
+
   private async waitForConfirmation(
     hash: string,
     retries = 10

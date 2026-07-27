@@ -308,6 +308,11 @@ impl IdentityRegistry {
         }
     }
 
+    pub fn did_exists(env: Env, controller: Address) -> bool {
+        let key = Self::did_key(&env, &controller);
+        env.storage().persistent().has(&key)
+    }
+
     pub fn get_did_count(env: Env) -> u32 {
         env.storage().instance().get(&DID_COUNT).unwrap_or(0)
     }
