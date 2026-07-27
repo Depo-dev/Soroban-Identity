@@ -308,6 +308,23 @@ impl IdentityRegistry {
         }
     }
 
+    /// Lightweight existence check for a DID, regardless of activation status.
+    ///
+    /// Returns `true` if a DID document exists for the given address (active or
+    /// deactivated), `false` otherwise. This avoids the overhead of deserializing
+    /// the full document when only an existence check is needed.
+    ///
+    /// # Arguments
+    /// * `env` - The Soroban environment.
+    /// * `controller` - The address to check.
+    ///
+    /// # Returns
+    /// `true` if a DID exists for the address, `false` otherwise.
+    pub fn did_exists(env: Env, controller: Address) -> bool {
+        let key = Self::did_key(&env, &controller);
+        env.storage().persistent().has(&key)
+    }
+
     pub fn get_did_count(env: Env) -> u32 {
         env.storage().instance().get(&DID_COUNT).unwrap_or(0)
     }
@@ -708,5 +725,48 @@ mod tests {
         // Verify the document is now active
         let doc = client.resolve_did(&user);
         assert!(doc.active);
+    }
+
+    /// did_exists returns true for both active and deactivated DIDs.
+    #[test]
+    fn test_did_exists() {
+        let (env, client) = setup();
+        let user = Address::generate(&env);
+        
+        // Before creation, did_exists should return false
+        assert!(!client.did_exists(&user));
+        
+        // Create DID
+        client.create_did(&user, &Map::new(&env));
+        assert!(client.did_exists(&user));
+        assert!(client.has_active_did(&user));
+        
+        // After deactivation, did_exists should still return true
+        client.deactivate_did(&user);
+        assert!(client.did_exists(&user));
+        assert!(!client.has_active_did(&user));
+    }
+
+    /// did_exists is lightweight and doesn't deserialize the document.
+    #[test]
+    fn test_did_exists_vs_has_active_did() {
+        let (env, client) = setup();
+        let user1 = Address::generate(&env);
+        let user2 = Address::generate(&env);
+        
+        // No DID exists
+        assert!(!client.did_exists(&user1));
+        assert!(!client.has_active_did(&user1));
+        
+        // Active DID
+        client.create_did(&user1, &Map::new(&env));
+        assert!(client.did_exists(&user1));
+        assert!(client.has_active_did(&user1));
+        
+        // Deactivated DID
+        client.create_did(&user2, &Map::new(&env));
+        client.deactivate_did(&user2);
+        assert!(client.did_exists(&user2));
+        assert!(!client.has_active_did(&user2));
     }
 }
