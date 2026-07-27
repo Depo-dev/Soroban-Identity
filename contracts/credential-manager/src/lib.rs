@@ -43,6 +43,7 @@ pub enum ContractError {
     NotPendingAdmin = 11,
     SchemaNotFound = 12,
     CredentialNotExpiredYet = 13,
+    SubjectHasNoDid = 14,
 }
 
 // ── Data types ────────────────────────────────────────────────────────────────
@@ -187,9 +188,19 @@ impl CredentialManager {
         let registry_id: Address = env.storage().instance().get(&IDENTITY_REGISTRY).ok_or(ContractError::NotInitialized)?;
         let mut registry_args: Vec<Val> = Vec::new(&env);
         registry_args.push_back(subject.clone().into_val(&env));
-        let has_did: bool = env.invoke_contract(&registry_id, &Symbol::new(&env, "has_active_did"), registry_args);
+        // Wrap the cross-contract call so a missing/deactivated DID (or any
+        // failure in identity-registry) surfaces as a typed error instead of
+        // an opaque panic.
+        let has_did: bool = match env.try_invoke_contract::<bool, soroban_sdk::Error>(
+            &registry_id,
+            &Symbol::new(&env, "has_active_did"),
+            registry_args,
+        ) {
+            Ok(Ok(val)) => val,
+            _ => return Err(ContractError::SubjectHasNoDid),
+        };
         if !has_did {
-            panic!("subject does not have an active DID");
+            return Err(ContractError::SubjectHasNoDid);
         }
 
         let now = env.ledger().timestamp();
@@ -233,8 +244,15 @@ impl CredentialManager {
         // Apply ring-buffer semantics: cap at MAX_ISSUER_CREDS
         let mut issuer_creds = Self::fetch_issuer_creds(&env, &issuer);
         if issuer_creds.len() >= MAX_ISSUER_CREDS {
-            // Drop the oldest (head) entry
+            // Drop the oldest (head) entry, emitting an event so indexers can
+            // detect and recover evicted credential ids instead of silently
+            // losing them.
+            let evicted_id = issuer_creds.get(0).expect("ring buffer non-empty");
             issuer_creds = issuer_creds.slice(1..issuer_creds.len());
+            env.events().publish(
+                (CRED, symbol_short!("evicted")),
+                (EVENT_VERSION, issuer.clone(), evicted_id),
+            );
         }
         issuer_creds.push_back(id.clone());
         let issuer_creds_key = Self::issuer_creds_key(&issuer);
