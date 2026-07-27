@@ -22,6 +22,7 @@ Each `contract-event` message includes:
 | `IDENTITY,created` | `[controller: string, timestamp: number]` |
 | `IDENTITY,updated` | `[controller: string, metadataHash: string]` |
 | `IDENTITY,deact` | `[controller: string, timestamp: number]` |
+| `admin,xfer` | `[oldAdmin: string, newAdmin: string]` |
 
 ## credential-manager events
 

@@ -232,7 +232,13 @@ impl IdentityRegistry {
         env.storage().instance().set(&ADMIN, &proposed);
         env.events().publish(
             (ADMIN, symbol_short!("accepted")),
-            (EVENT_VERSION, old_admin, proposed),
+            (EVENT_VERSION, old_admin.clone(), proposed.clone()),
+        );
+        // Issue #549: explicit admin-transfer-completed event for off-chain
+        // monitors/audit logs watching for ownership changes.
+        env.events().publish(
+            (symbol_short!("admin"), symbol_short!("xfer")),
+            (old_admin, proposed),
         );
         Ok(())
     }
