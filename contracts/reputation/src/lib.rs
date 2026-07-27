@@ -9,7 +9,12 @@ use soroban_sdk::{
 
 pub const CONTRACT_VERSION: u32 = 1;
 const EVENT_VERSION: u32 = 1;
-const MIN_INTERVAL: u32 = 100;
+/// Default rate-limit window (in ledgers) used when the contract is initialized.
+const DEFAULT_MIN_INTERVAL: u32 = 100;
+/// Lowest value an admin may configure the rate-limit window to.
+const MIN_INTERVAL_FLOOR: u32 = 10;
+/// Highest value an admin may configure the rate-limit window to.
+const MIN_INTERVAL_CEILING: u32 = 50_000;
 const MIN_SCORE: i64 = 0;
 const TTL_MAX: u32 = 6_312_000;
 const MAX_HISTORY: usize = 50;
@@ -28,6 +33,7 @@ const SCORE_CNT: Symbol = symbol_short!("SCRCNT");
 const RECORD: Symbol = symbol_short!("rec");
 const HISTORY: Symbol = symbol_short!("h");
 const RATE_LIMIT: Symbol = symbol_short!("rl");
+const MIN_INTERVAL_KEY: Symbol = symbol_short!("MININTVL");
 const DISPUTE: Symbol = symbol_short!("dispute");
 const DISPUTE_CNT: Symbol = symbol_short!("disp_cnt");
 
@@ -48,6 +54,7 @@ pub enum ContractError {
     DisputeNotFound = 9,
     DisputeExpired = 10,
     DisputeAlreadyResolved = 11,
+    InvalidMinInterval = 12,
 }
 
 // ── Data types ────────────────────────────────────────────────────────────────
@@ -125,7 +132,34 @@ impl Reputation {
     pub fn initialize(env: Env, admin: Address) -> Result<(), ContractError> {
         Self::require_uninitialized(&env)?;
         Self::set_admin(&env, &admin);
+        env.storage().instance().set(&MIN_INTERVAL_KEY, &DEFAULT_MIN_INTERVAL);
         env.events().publish((ADMIN, symbol_short!("init")), (EVENT_VERSION, admin));
+        Ok(())
+    }
+
+    /// Returns the current rate-limit window, in ledgers, between successive
+    /// `submit_score` calls from the same reporter for the same subject.
+    pub fn get_min_interval(env: Env) -> u32 {
+        env.storage().instance().get(&MIN_INTERVAL_KEY).unwrap_or(DEFAULT_MIN_INTERVAL)
+    }
+
+    /// Sets the rate-limit window, in ledgers. Admin only.
+    /// Returns [`ContractError::InvalidMinInterval`] if `ledgers` is outside
+    /// [[`MIN_INTERVAL_FLOOR`], [`MIN_INTERVAL_CEILING`]].
+    pub fn set_min_interval(env: Env, admin: Address, ledgers: u32) -> Result<(), ContractError> {
+        admin.require_auth();
+        let stored: Address = env.storage().instance().get(&ADMIN).ok_or(ContractError::NotInitialized)?;
+        if stored != admin {
+            return Err(ContractError::Unauthorized);
+        }
+        if ledgers < MIN_INTERVAL_FLOOR || ledgers > MIN_INTERVAL_CEILING {
+            return Err(ContractError::InvalidMinInterval);
+        }
+        env.storage().instance().set(&MIN_INTERVAL_KEY, &ledgers);
+        env.events().publish(
+            (MIN_INTERVAL_KEY, symbol_short!("updated")),
+            (EVENT_VERSION, admin, ledgers),
+        );
         Ok(())
     }
 
@@ -479,8 +513,9 @@ impl Reputation {
     fn check_and_set_rate_limit(env: &Env, subject: &Address, reporter: &Address) -> Result<(), ContractError> {
         let rate_key = Self::rate_key(subject, reporter);
         let current_ledger = env.ledger().sequence();
+        let min_interval: u32 = env.storage().instance().get(&MIN_INTERVAL_KEY).unwrap_or(DEFAULT_MIN_INTERVAL);
         if let Some(last_ledger) = env.storage().persistent().get::<(Symbol, Address, Address), u32>(&rate_key) {
-            if current_ledger <= last_ledger + MIN_INTERVAL { return Err(ContractError::RateLimitExceeded); }
+            if current_ledger <= last_ledger + min_interval { return Err(ContractError::RateLimitExceeded); }
         }
         env.storage().persistent().set(&rate_key, &current_ledger);
         env.storage().persistent().extend_ttl(&rate_key, TTL_MAX, TTL_MAX);
@@ -682,9 +717,81 @@ mod tests {
         );
     }
 
+    // ── SC-09: configurable rate-limit window ────────────────────────────────
+
+    #[test]
+    fn test_default_min_interval_used_on_init() {
+        let (_env, _admin, client) = setup();
+        assert_eq!(client.get_min_interval(), DEFAULT_MIN_INTERVAL);
+    }
+
+    #[test]
+    fn test_admin_can_change_min_interval_and_it_affects_rate_limiting() {
+        let (env, admin, client) = setup();
+        let reporter = Address::generate(&env);
+        let subject = Address::generate(&env);
+        client.add_reporter(&reporter);
+        client.set_min_interval(&admin, &20);
+        assert_eq!(client.get_min_interval(), 20);
+
+        let reason = String::from_str(&env, "activity");
+        client.submit_score(&reporter, &subject, &10, &reason);
+
+        // Still within the new, shorter window — rejected.
+        env.ledger().with_mut(|li| li.sequence_number += 15);
+        assert_eq!(
+            client.try_submit_score(&reporter, &subject, &10, &reason),
+            Err(Ok(ContractError::RateLimitExceeded))
+        );
+
+        // Past the new window — accepted.
+        env.ledger().with_mut(|li| li.sequence_number += 10);
+        client.submit_score(&reporter, &subject, &10, &reason);
+    }
+
+    #[test]
+    fn test_set_min_interval_floor_enforced() {
+        let (_env, admin, client) = setup();
+        assert_eq!(
+            client.try_set_min_interval(&admin, &(MIN_INTERVAL_FLOOR - 1)),
+            Err(Ok(ContractError::InvalidMinInterval))
+        );
+        assert_eq!(client.get_min_interval(), DEFAULT_MIN_INTERVAL);
+    }
+
+    #[test]
+    fn test_set_min_interval_ceiling_enforced() {
+        let (_env, admin, client) = setup();
+        assert_eq!(
+            client.try_set_min_interval(&admin, &(MIN_INTERVAL_CEILING + 1)),
+            Err(Ok(ContractError::InvalidMinInterval))
+        );
+        assert_eq!(client.get_min_interval(), DEFAULT_MIN_INTERVAL);
+    }
+
+    #[test]
+    fn test_set_min_interval_boundary_values_allowed() {
+        let (_env, admin, client) = setup();
+        client.set_min_interval(&admin, &MIN_INTERVAL_FLOOR);
+        assert_eq!(client.get_min_interval(), MIN_INTERVAL_FLOOR);
+        client.set_min_interval(&admin, &MIN_INTERVAL_CEILING);
+        assert_eq!(client.get_min_interval(), MIN_INTERVAL_CEILING);
+    }
+
+    #[test]
+    fn test_set_min_interval_unauthorized_caller() {
+        let (env, _admin, client) = setup();
+        let attacker = Address::generate(&env);
+        assert_eq!(
+            client.try_set_min_interval(&attacker, &500),
+            Err(Ok(ContractError::Unauthorized))
+        );
+        assert_eq!(client.get_min_interval(), DEFAULT_MIN_INTERVAL);
+    }
+
     #[test]
     fn test_storage_key_symbols_are_unique() {
-        let keys = [ADMIN, REPORTER, DEF_THRESH, SUBJECT_CNT, SCORE_CNT, RECORD, HISTORY, RATE_LIMIT, DISPUTE, DISPUTE_CNT];
+        let keys = [ADMIN, REPORTER, DEF_THRESH, SUBJECT_CNT, SCORE_CNT, RECORD, HISTORY, RATE_LIMIT, DISPUTE, DISPUTE_CNT, MIN_INTERVAL_KEY];
         for (i, left) in keys.iter().enumerate() {
             for right in keys.iter().skip(i + 1) {
                 assert_ne!(left, right);
