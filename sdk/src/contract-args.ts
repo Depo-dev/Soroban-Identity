@@ -85,6 +85,18 @@ export function buildDeactivateDidArgs(params: {
   return [nativeToScVal(params.controller, { type: 'address' })];
 }
 
+/**
+ * Build args for `did_exists(controller)`.
+ *
+ * @param params.controller Stellar address to check for DID existence.
+ * @returns ScVal array ready for `contract.call('did_exists', ...)`.
+ */
+export function buildDidExistsArgs(params: {
+  controller: string;
+}): xdr.ScVal[] {
+  return [nativeToScVal(params.controller, { type: 'address' })];
+}
+
 // ── credential-manager ───────────────────────────────────────────────────────
 
 /**
