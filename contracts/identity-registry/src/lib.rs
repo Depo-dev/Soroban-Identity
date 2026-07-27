@@ -23,7 +23,7 @@ const DID_STELLAR_PREFIX: &[u8] = b"did:stellar:";
 const TTL_LEDGERS: u32 = 6_312_000;
 
 /// Maximum number of service endpoints allowed on a DID document.
-/// Exceeding this limit returns [`ContractError::MetadataTooLarge`].
+/// Exceeding this limit returns [`ContractError::MaxServicesReached`].
 const MAX_SERVICES: u32 = 10;
 
 // ── Errors ────────────────────────────────────────────────────────────────────
@@ -43,6 +43,7 @@ pub enum ContractError {
     NoPendingAdmin = 10,
     NotPendingAdmin = 11,
     ServiceAlreadyExists = 12,
+    MaxServicesReached = 13,
 }
 
 // ── Data types ────────────────────────────────────────────────────────────────
@@ -166,7 +167,7 @@ impl IdentityRegistry {
     }
 
     /// Appends a service endpoint to an existing DID document.
-    /// Returns [`ContractError::MetadataTooLarge`] when the document already has
+    /// Returns [`ContractError::MaxServicesReached`] when the document already has
     /// [`MAX_SERVICES`] endpoints, or [`ContractError::ServiceAlreadyExists`] when
     /// an endpoint with the same `id` is already present.
     pub fn add_service(env: Env, controller: Address, service: ServiceEndpoint) -> Result<(), ContractError> {
@@ -178,7 +179,7 @@ impl IdentityRegistry {
             return Err(ContractError::DidDeactivated);
         }
         if doc.services.len() >= MAX_SERVICES {
-            return Err(ContractError::MetadataTooLarge);
+            return Err(ContractError::MaxServicesReached);
         }
         // Enforce id-uniqueness across existing endpoints.
         for svc in doc.services.iter() {
@@ -555,7 +556,7 @@ mod tests {
         ServiceEndpoint { id: s.clone(), type_: s.clone(), service_endpoint: s }
     }
 
-    /// Exactly MAX_SERVICES endpoints must be accepted; MAX_SERVICES+1 must return MetadataTooLarge.
+    /// Exactly MAX_SERVICES endpoints must be accepted; MAX_SERVICES+1 must return MaxServicesReached.
     #[test]
     fn test_add_service_max_services_boundary() {
         let (env, client) = setup();
@@ -565,7 +566,7 @@ mod tests {
             client.add_service(&user, &make_service(&env, i));
         }
         let result = client.try_add_service(&user, &make_service(&env, MAX_SERVICES));
-        assert_eq!(result, Err(Ok(ContractError::MetadataTooLarge)));
+        assert_eq!(result, Err(Ok(ContractError::MaxServicesReached)));
     }
 
     /// reactivate_did called by non-admin returns Unauthorized.
@@ -680,7 +681,7 @@ mod tests {
         let overflow = make_endpoint(&env, "overflow");
         assert_eq!(
             client.try_add_service(&user, &overflow),
-            Err(Ok(ContractError::MetadataTooLarge)),
+            Err(Ok(ContractError::MaxServicesReached)),
         );
 
         // Uniqueness is enforced independently (id that already exists on a non-full doc).
