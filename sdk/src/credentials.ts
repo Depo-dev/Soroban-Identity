@@ -749,6 +749,17 @@ export class CredentialClient extends BaseClient {
       const error: string = (result as { error: string }).error ?? "";
       const contractErr = ContractError.extract(error, CREDENTIAL_MANAGER_ERRORS);
       if (!contractErr) {
+        const lower = error.toLowerCase();
+        if (
+          lower.includes("credentialnotfound") ||
+          lower.includes("credential not found") ||
+          lower.includes("not found")
+        ) {
+          throw new SorobanIdentityError(
+            `Credential not found: ${credentialId}`,
+            "NOT_FOUND"
+          );
+        }
         throw new SorobanIdentityError(`Simulation failed: ${error}`, "CONTRACT_ERROR");
       }
       if (contractErr.code === CREDENTIAL_NOT_FOUND_CODE) {
