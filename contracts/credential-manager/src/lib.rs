@@ -20,10 +20,11 @@ const TOTAL_ISSUED_CNT: Symbol = symbol_short!("TOTALCNT");
 const ISSUER_CREDS: Symbol = symbol_short!("ISSCREDS");
 const SCHEMA: Symbol = symbol_short!("SCHEMA");
 const IDENTITY_REGISTRY: Symbol = symbol_short!("IDREGIST");
-/// Hard ceiling `set_max_issuers` can never exceed (Issue #532).
-const ABSOLUTE_MAX_ISSUERS: u32 = 500;
-/// Storage key for the admin-configurable issuer cap (defaults to `MAX_ISSUERS`).
-const MAX_ISSUERS_KEY: Symbol = symbol_short!("MAXISS");
+/// Issue #551: reentrancy guard flag. Set for the duration of any function
+/// that performs a cross-contract call (e.g. `issue_credential` calling
+/// into `identity-registry`), so a re-invocation of a guarded function
+/// during that call is rejected instead of observing half-updated state.
+const EXECUTING: Symbol = symbol_short!("EXEC");
 
 const MAX_ISSUERS: u32 = 100;
 const MAX_ISSUER_CREDS: u32 = 10_000;
@@ -47,6 +48,9 @@ pub enum ContractError {
     NotPendingAdmin = 11,
     SchemaNotFound = 12,
     CredentialNotExpiredYet = 13,
+    /// Issue #551: a guarded function was re-entered while a prior
+    /// invocation (which is mid cross-contract call) had not yet completed.
+    ReentrantCall = 14,
     SubjectHasNoDid = 14,
 }
 
@@ -97,6 +101,41 @@ pub struct Credential {
     pub expires_at: u64,
     pub revoked: bool,
     pub schema_hash: Option<BytesN<32>>,
+}
+
+// ── Reentrancy guard (Issue #551) ──────────────────────────────────────────────
+//
+// Cross-contract call order for this contract:
+//   credential-manager::issue_credential -> identity-registry::has_active_did
+// `has_active_did` is a read-only query on identity-registry and does not
+// call back into credential-manager, so there is no circular invocation
+// path today. This guard exists as defense-in-depth: it makes any future
+// cross-contract call added to a guarded function fail closed (reject
+// reentrant invocations) rather than silently allowing partially-applied
+// state if the called contract were ever changed to call back into us.
+
+/// RAII guard: sets the `EXECUTING` instance-storage flag on construction
+/// and clears it on drop, so the flag is cleared on every normal exit path
+/// (including early returns via `?`) without needing to remember to clear
+/// it manually at each return site.
+struct ReentrancyGuard<'a> {
+    env: &'a Env,
+}
+
+impl<'a> ReentrancyGuard<'a> {
+    fn acquire(env: &'a Env) -> Result<Self, ContractError> {
+        if env.storage().instance().get(&EXECUTING).unwrap_or(false) {
+            return Err(ContractError::ReentrantCall);
+        }
+        env.storage().instance().set(&EXECUTING, &true);
+        Ok(Self { env })
+    }
+}
+
+impl<'a> Drop for ReentrancyGuard<'a> {
+    fn drop(&mut self) {
+        self.env.storage().instance().remove(&EXECUTING);
+    }
 }
 
 #[contract]
@@ -191,6 +230,9 @@ impl CredentialManager {
                 return Err(ContractError::SchemaNotFound);
             }
         }
+
+        // Issue #551: guard the cross-contract call into identity-registry.
+        let _guard = ReentrancyGuard::acquire(&env)?;
 
         let registry_id: Address = env.storage().instance().get(&IDENTITY_REGISTRY).ok_or(ContractError::NotInitialized)?;
         let mut registry_args: Vec<Val> = Vec::new(&env);
