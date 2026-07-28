@@ -1,4 +1,5 @@
 #![no_std]
+#![deny(clippy::all)]
 
 use soroban_sdk::{
     contract, contracterror, contractimpl, contracttype, symbol_short,
@@ -93,9 +94,9 @@ impl IdentityRegistry {
 
     pub fn transfer_admin(env: Env, current_admin: Address, new_admin: Address) -> Result<(), ContractError> {
         current_admin.require_auth();
-        let stored: Address = env.storage().instance().get(&ADMIN).expect("not initialized");
+        let stored: Address = env.storage().instance().get(&ADMIN).ok_or(ContractError::NotInitialized)?;
         if stored != current_admin {
-            panic!("not the admin");
+            return Err(ContractError::Unauthorized);
         }
         env.storage().instance().set(&ADMIN, &new_admin);
         env.events().publish((ADMIN, symbol_short!("transfer")), (EVENT_VERSION, current_admin, new_admin));
@@ -132,7 +133,6 @@ impl IdentityRegistry {
             (symbol_short!("admin"), symbol_short!("xfer")),
             (old_admin, proposed),
         );
-        env.events().publish((ADMIN, symbol_short!("accepted")), (EVENT_VERSION, old_admin, proposed));
         Ok(())
     }
 
@@ -155,7 +155,9 @@ impl IdentityRegistry {
         }
         Self::validate_metadata(&metadata)?;
         let did_id = Self::build_did_string(&env, &controller);
-        if !Self::validate_did_format(&env, &did_id) { return Err(ContractError::DidNotFound); }
+        if !Self::validate_did_format(&env, &did_id) {
+            return Err(ContractError::DidNotFound);
+        }
         let now = env.ledger().timestamp();
         let doc = DidDocument {
             id: did_id.clone(),
@@ -352,7 +354,9 @@ impl IdentityRegistry {
         controller.require_auth();
         let key = Self::did_key(&env, &controller);
         let mut doc: DidDocument = env.storage().persistent().get(&key).ok_or(ContractError::DidNotFound)?;
-        if !doc.active { return Err(ContractError::DidDeactivated); }
+        if !doc.active {
+            return Err(ContractError::DidDeactivated);
+        }
         let mut found = false;
         let mut updated = Vec::new(&env);
         for svc in doc.services.iter() {
@@ -375,14 +379,18 @@ impl IdentityRegistry {
     pub fn get_services(env: Env, controller: Address) -> Result<Vec<ServiceEndpoint>, ContractError> {
         let key = Self::did_key(&env, &controller);
         let doc: DidDocument = env.storage().persistent().get(&key).ok_or(ContractError::DidNotFound)?;
-        if !doc.active { return Err(ContractError::DidDeactivated); }
+        if !doc.active {
+            return Err(ContractError::DidDeactivated);
+        }
         Ok(doc.services)
     }
 
     // ── Helpers ───────────────────────────────────────────────────────────────
 
     fn require_uninitialized(env: &Env) -> Result<(), ContractError> {
-        if env.storage().instance().has(&ADMIN) { return Err(ContractError::AlreadyInitialized); }
+        if env.storage().instance().has(&ADMIN) {
+            return Err(ContractError::AlreadyInitialized);
+        }
         Ok(())
     }
 
@@ -391,9 +399,13 @@ impl IdentityRegistry {
     }
 
     fn validate_metadata(metadata: &Map<String, String>) -> Result<(), ContractError> {
-        if metadata.len() > 10 { return Err(ContractError::MetadataTooLarge); }
+        if metadata.len() > 10 {
+            return Err(ContractError::MetadataTooLarge);
+        }
         for (k, v) in metadata.iter() {
-            if k.len() > 64 || v.len() > 256 { return Err(ContractError::MetadataTooLong); }
+            if k.len() > 64 || v.len() > 256 {
+                return Err(ContractError::MetadataTooLong);
+            }
         }
         Ok(())
     }
