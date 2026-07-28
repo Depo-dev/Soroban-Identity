@@ -3,8 +3,10 @@ import {
   TransactionBuilder,
   xdr,
   BASE_FEE,
+  SorobanRpc,
 } from '@stellar/stellar-sdk';
-import type { SorobanIdentityConfig } from './types';
+import type { SorobanIdentityConfig, FeeEstimate } from './types';
+import { SimulationError } from './types';
 import type { Account } from '@stellar/stellar-sdk';
 
 /**
@@ -20,7 +22,7 @@ export class SorobanTransactionBuilder {
   constructor(account: Account, config: SorobanIdentityConfig) {
     this.account = account;
     this.config = config;
-    this.fee = 100; // BASE_FEE in stroops
+    this.fee = parseInt(BASE_FEE, 10);
   }
 
   /**
@@ -99,5 +101,53 @@ export class SorobanTransactionBuilder {
    */
   getConfig(): SorobanIdentityConfig {
     return this.config;
+  }
+
+  /**
+   * Simulate the full set of accumulated operations (or a single provided
+   * operation when the builder is empty) and return the fee breakdown before
+   * signing. Does not prompt for a Freighter signature.
+   *
+   * Previously this method always built a one-operation throwaway transaction
+   * from the argument alone, completely ignoring `this.operations`. For a
+   * multi-operation builder that understated the real cost. Now the accumulated
+   * operations take precedence; the `operation` argument acts as a fallback
+   * when no operations have been added yet (Issue #477).
+   */
+  async estimateFee(operation: xdr.Operation): Promise<FeeEstimate> {
+    const server = new SorobanRpc.Server(
+      Array.isArray(this.config.rpcUrl) ? this.config.rpcUrl[0] : this.config.rpcUrl,
+    );
+    const builder = new TransactionBuilder(this.account, {
+      fee: BASE_FEE,
+      networkPassphrase: this.config.networkPassphrase,
+    });
+
+    // Use the accumulated operations when available so the fee estimate
+    // reflects the real multi-operation cost. Fall back to the single
+    // operation argument only when the builder has no accumulated ops.
+    const opsToEstimate = this.operations.length > 0 ? this.operations : [operation];
+    for (const op of opsToEstimate) {
+      builder.addOperation(op);
+    }
+    builder.setTimeout(30);
+    const tx = builder.build();
+
+    const result = await server.simulateTransaction(tx);
+
+    if (SorobanRpc.Api.isSimulationError(result)) {
+      throw new SimulationError(
+        result.error ?? 'Transaction simulation failed',
+        result,
+      );
+    }
+
+    const baseFee = parseInt(BASE_FEE, 10);
+    const resourceFee = parseInt(
+      (result as SorobanRpc.Api.SimulateTransactionSuccessResponse).minResourceFee ?? '0',
+      10,
+    );
+
+    return { baseFee, resourceFee, totalFee: baseFee + resourceFee };
   }
 }

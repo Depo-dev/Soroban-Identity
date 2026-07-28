@@ -1,4 +1,4 @@
-import { useState, useReducer } from 'react';
+import { useState, useReducer, useEffect, useRef } from 'react';
 import { QRCodeSVG } from 'qrcode.react';
 import { StrKey } from '@stellar/stellar-sdk';
 import type { WalletState } from '../hooks/useWallet';
@@ -41,8 +41,6 @@ function identityReducer(_state: IdentityState, action: IdentityAction): Identit
 export default function IdentityPanel() {
   const wallet = useWalletContext();
   const [identityState, dispatch] = useReducer(identityReducer, { status: 'idle' });
-
-  const resolveResult = identityState.status === 'success' ? JSON.stringify(identityState.did, null, 2) : null;
   const resolving = identityState.status === 'loading';
   const networkError = identityState.status === 'error'
     ? { type: identityState.errorType as 'network' | 'contract', message: identityState.message }
@@ -57,6 +55,14 @@ export default function IdentityPanel() {
   const [showHistory, setShowHistory] = useState(false);
   const { history, addAddress, clearHistory } = useAddressHistory();
 
+  const prevConnected = useRef(wallet.connected);
+  useEffect(() => {
+    if (prevConnected.current && !wallet.connected) {
+      clearHistory();
+    }
+    prevConnected.current = wallet.connected;
+  }, [wallet.connected, clearHistory]);
+
   const [createResult, setCreateResult] = useState<string | null>(null);
   const [creating, setCreating] = useState(false);
 
@@ -64,6 +70,9 @@ export default function IdentityPanel() {
   const [metadataError, setMetadataError] = useState<string | null>(null);
   const [updating, setUpdating] = useState(false);
   const [updateSuccess, setUpdateSuccess] = useState(false);
+  const [isEditingMetadata, setIsEditingMetadata] = useState(false);
+  const [editingMetadata, setEditingMetadata] = useState<Array<{ key: string; value: string }>>([]);
+  const [editingFieldErrors, setEditingFieldErrors] = useState<Record<number, string | null>>({});
 
   const [minScore, setMinScore] = useState("50");
   const [minReporters, setMinReporters] = useState("2");
@@ -311,6 +320,113 @@ export default function IdentityPanel() {
     }
   };
 
+  const handleEditMetadata = () => {
+    if (resolvedDoc?.metadata) {
+      const entries = Object.entries(resolvedDoc.metadata).map(([key, value]) => ({
+        key,
+        value: String(value),
+      }));
+      setEditingMetadata(entries);
+    }
+    setIsEditingMetadata(true);
+    setEditingFieldErrors({});
+  };
+
+  const handleCancelEdit = () => {
+    setIsEditingMetadata(false);
+    setEditingMetadata([]);
+    setEditingFieldErrors({});
+  };
+
+  // Warn user if navigating away while editing
+  useEffect(() => {
+    const handleBeforeUnload = (e: BeforeUnloadEvent) => {
+      if (isEditingMetadata) {
+        e.preventDefault();
+        e.returnValue = '';
+        return '';
+      }
+    };
+
+    window.addEventListener('beforeunload', handleBeforeUnload);
+    return () => window.removeEventListener('beforeunload', handleBeforeUnload);
+  }, [isEditingMetadata]);
+
+  const handleSaveMetadata = async () => {
+    if (!wallet.connected || !wallet.publicKey) return;
+
+    // Validate no duplicate keys
+    const keys = editingMetadata.map(e => e.key.trim()).filter(k => k);
+    const uniqueKeys = new Set(keys);
+    if (keys.length !== uniqueKeys.size) {
+      setMetadataError('Duplicate metadata keys are not allowed');
+      return;
+    }
+
+    setMetadataError(null);
+    setUpdating(true);
+    setUpdateSuccess(false);
+    try {
+      // Build metadata object from entries
+      const metadata: Record<string, string> = {};
+      editingMetadata.forEach(entry => {
+        if (entry.key.trim() && entry.value.trim()) {
+          metadata[entry.key.trim()] = entry.value.trim();
+        }
+      });
+
+      const networkConfig = getNetworkConfig();
+      const server = new SorobanRpc.Server(typeof networkConfig.rpcUrl === 'string' ? networkConfig.rpcUrl : networkConfig.rpcUrl[0]);
+      const contract = new Contract(networkConfig.identityRegistryId);
+      const account = await server.getAccount(wallet.publicKey);
+
+      const tx = new TransactionBuilder(account, {
+        fee: BASE_FEE,
+        networkPassphrase: networkConfig.networkPassphrase,
+      })
+        .addOperation(
+          contract.call(
+            "update_did",
+            nativeToScVal(wallet.publicKey, { type: "address" }),
+            nativeToScVal(metadata, { type: "map" })
+          )
+        )
+        .setTimeout(30)
+        .build();
+
+      const prepared = await server.prepareTransaction(tx);
+      const signedXdr = await wallet.signTransaction(prepared.toXDR());
+      const signedTx = TransactionBuilder.fromXDR(signedXdr, networkConfig.networkPassphrase);
+      const result = await server.sendTransaction(signedTx as any);
+      
+      if (result.status !== "PENDING") {
+        throw new Error(`Transaction failed: ${result.status}`);
+      }
+      
+      let txStatus = await server.getTransaction(result.hash);
+      while (txStatus.status === "NOT_FOUND") {
+        await new Promise(r => setTimeout(r, 2000));
+        txStatus = await server.getTransaction(result.hash);
+      }
+      if (txStatus.status === "FAILED") {
+        throw new Error("Transaction failed on-chain");
+      }
+      
+      const identityClient = new IdentityClient(networkConfig);
+      const updatedDid = await identityClient.resolveDid(wallet.publicKey);
+      
+      dispatch({ type: 'FETCH_SUCCESS', did: updatedDid, reputation: null, scoreHistory: [] });
+      setUpdateSuccess(true);
+      setIsEditingMetadata(false);
+      setEditingMetadata([]);
+      setTimeout(() => setUpdateSuccess(false), 3000);
+    } catch (e: unknown) {
+      setMetadataError(`Error: ${handleError(e)}`);
+    } finally {
+      setUpdating(false);
+    }
+  };
+
   return (
     <>
       <div className="card">
@@ -363,8 +479,8 @@ export default function IdentityPanel() {
         <button onClick={handleResolve} disabled={resolving || !resolveAddress}>
           {resolving ? 'Resolving…' : 'Resolve'}
         </button>
-        {resolving && <SkeletonCard rows={4} />}
-        {!resolving && resolveResult && (
+        {resolving && <SkeletonCard variant="identity" />}
+        {!resolving && resolvedAddress && (
           <>
             <div style={{ 
               display: 'flex', 
@@ -376,11 +492,26 @@ export default function IdentityPanel() {
               borderRadius: '0.5rem',
               border: '1px solid var(--card-border-accent)'
             }}>
-              <div style={{ flex: 1, wordBreak: 'break-all', fontSize: '0.9rem', color: 'var(--accent-light)' }}>
-                <strong>DID:</strong> did:stellar:{resolvedAddress}
+              <div
+                style={{ flex: 1, wordBreak: 'break-all', fontSize: '0.9rem' }}
+                title={`did:stellar:${resolvedAddress}`}
+              >
+                <span style={{ color: 'var(--text-muted)', fontWeight: 400 }}>did:stellar:</span>
+                <span
+                  className="did-identifier"
+                  style={{ color: 'var(--accent-light)', fontWeight: 700 }}
+                >
+                  {/* Full address — hidden on mobile via CSS, shown on desktop */}
+                  <span className="did-identifier-full">{resolvedAddress}</span>
+                  {/* Truncated address — shown on mobile, hidden on desktop */}
+                  <span className="did-identifier-short">
+                    {`${resolvedAddress.slice(0, 8)}…${resolvedAddress.slice(-4)}`}
+                  </span>
+                </span>
               </div>
               <button
                 onClick={handleCopyDid}
+                aria-label="Copy full DID to clipboard"
                 style={{
                   padding: '0.4rem 0.8rem',
                   fontSize: '0.85rem',
@@ -394,7 +525,6 @@ export default function IdentityPanel() {
                 {copied ? '✓ Copied!' : '📋 Copy'}
               </button>
             </div>
-            <pre className="result">{resolveResult}</pre>
             {resolvedDoc && (
               <div style={{ fontSize: '0.8rem', color: 'var(--text-muted)', marginTop: '0.5rem', lineHeight: 1.6 }}>
                 <span><strong>Created:</strong> {formatTimestamp(resolvedDoc.createdAt)}</span>
@@ -428,6 +558,14 @@ export default function IdentityPanel() {
             >
               Export JSON-LD
             </button>
+            {!isEditingMetadata && resolvedDoc?.metadata && Object.keys(resolvedDoc.metadata).length > 0 && (
+              <button
+                onClick={handleEditMetadata}
+                style={{ marginLeft: '0.5rem' }}
+              >
+                Edit Metadata
+              </button>
+            )}
             {showQr && (
               <div style={{ marginTop: '0.75rem', display: 'inline-block', background: '#fff', padding: '0.5rem', borderRadius: '0.5rem' }}>
                 <QRCodeSVG value={`did:stellar:${resolvedAddress}`} size={180} level="M" />
@@ -458,7 +596,7 @@ export default function IdentityPanel() {
           </div>
         )}
 
-        {!reputationLoading && resolveResult && !reputation && (
+        {!reputationLoading && resolvedAddress && !reputation && (
           <div
             className="card"
             style={{ marginTop: '1rem', background: 'var(--card-bg-accent)', border: '1px solid var(--border-input)' }}
@@ -467,6 +605,109 @@ export default function IdentityPanel() {
             <p style={{ color: 'var(--text-muted)', fontSize: '0.85rem' }}>
               No reputation record found for this address.
             </p>
+          </div>
+        )}
+
+        {resolvedDoc?.metadata && Object.keys(resolvedDoc.metadata).length > 0 && (
+          <div
+            className="card"
+            style={{ marginTop: '1rem', background: 'var(--card-bg-accent)', border: '1px solid var(--card-border-accent)' }}
+          >
+            <h3 style={{ marginBottom: '0.5rem', color: 'var(--accent-light)' }}>Metadata</h3>
+            {!isEditingMetadata ? (
+              <>
+                {Object.entries(resolvedDoc.metadata).map(([key, value]) => (
+                  <div key={key} style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '0.5rem', fontSize: '0.9rem' }}>
+                    <span style={{ color: 'var(--text-muted)', fontWeight: 500 }}>{key}:</span>
+                    <span>{String(value)}</span>
+                  </div>
+                ))}
+              </>
+            ) : (
+              <div>
+                {editingMetadata.map((entry, idx) => (
+                  <div key={idx} style={{ display: 'flex', gap: '0.5rem', marginBottom: '0.5rem', alignItems: 'flex-start' }}>
+                    <div style={{ flex: 1 }}>
+                      <input
+                        type="text"
+                        placeholder="Key"
+                        value={entry.key}
+                        onChange={(e) => {
+                          const newEntries = [...editingMetadata];
+                          newEntries[idx].key = e.target.value;
+                          setEditingMetadata(newEntries);
+                        }}
+                        style={{ width: '100%', padding: '0.5rem', borderRadius: '0.25rem', border: '1px solid var(--border-light)', marginBottom: editingFieldErrors[idx] ? '0.25rem' : 0 }}
+                      />
+                      {editingFieldErrors[idx] && (
+                        <p style={{ color: 'var(--error)', fontSize: '0.75rem', margin: '0.25rem 0 0 0' }}>
+                          {editingFieldErrors[idx]}
+                        </p>
+                      )}
+                    </div>
+                    <div style={{ flex: 1 }}>
+                      <input
+                        type="text"
+                        placeholder="Value"
+                        value={entry.value}
+                        onChange={(e) => {
+                          const newEntries = [...editingMetadata];
+                          newEntries[idx].value = e.target.value;
+                          setEditingMetadata(newEntries);
+                        }}
+                        style={{ width: '100%', padding: '0.5rem', borderRadius: '0.25rem', border: '1px solid var(--border-light)' }}
+                      />
+                    </div>
+                  </div>
+                ))}
+                {metadataError && (
+                  <div style={{
+                    marginBottom: '0.75rem',
+                    padding: '0.5rem 1rem',
+                    borderRadius: '0.5rem',
+                    background: 'var(--danger-bg)',
+                    color: 'var(--danger-text)',
+                    border: '1px solid var(--danger-border)',
+                    fontSize: '0.9rem',
+                  }}>
+                    ✕ {metadataError}
+                  </div>
+                )}
+                <div style={{ display: 'flex', gap: '0.5rem', marginTop: '0.75rem' }}>
+                  <button
+                    onClick={handleSaveMetadata}
+                    disabled={updating}
+                    style={{
+                      padding: '0.5rem 1rem',
+                      background: 'var(--accent-light)',
+                      color: 'white',
+                      border: 'none',
+                      borderRadius: '0.25rem',
+                      cursor: 'pointer',
+                      fontSize: '0.85rem',
+                      opacity: updating ? 0.6 : 1,
+                    }}
+                  >
+                    {updating ? 'Saving…' : 'Save'}
+                  </button>
+                  <button
+                    onClick={handleCancelEdit}
+                    disabled={updating}
+                    style={{
+                      padding: '0.5rem 1rem',
+                      background: 'var(--border-input)',
+                      color: 'var(--text-muted)',
+                      border: 'none',
+                      borderRadius: '0.25rem',
+                      cursor: 'pointer',
+                      fontSize: '0.85rem',
+                    }}
+                  >
+                    Cancel
+                  </button>
+                </div>
+              </div>
+            )}
           </div>
         )}
       </div>

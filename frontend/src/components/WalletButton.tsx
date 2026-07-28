@@ -1,4 +1,4 @@
-import { useState, useCallback } from "react";
+import { useState, useCallback, useRef, useEffect } from "react";
 import type { WalletType } from "../hooks/useWallet";
 import { useWalletContext } from "../context/WalletContext";
 
@@ -7,6 +7,7 @@ export default function WalletButton() {
     connected,
     publicKey,
     connecting,
+    reconnecting,
     txLoading,
     error,
     walletType,
@@ -14,7 +15,10 @@ export default function WalletButton() {
     disconnect,
   } = useWalletContext();
   const [showPicker, setShowPicker] = useState(false);
+  const [showDropdown, setShowDropdown] = useState(false);
   const [copyFeedback, setCopyFeedback] = useState(false);
+  const dropdownRef = useRef<HTMLDivElement>(null);
+  const triggerRef = useRef<HTMLButtonElement>(null);
 
   const short = (key: string) => `${key.slice(0, 4)}…${key.slice(-4)}`;
 
@@ -27,11 +31,9 @@ export default function WalletButton() {
     if (!publicKey) return;
 
     try {
-      // Try modern Clipboard API first (requires secure context)
       if (navigator.clipboard && window.isSecureContext) {
         await navigator.clipboard.writeText(publicKey);
       } else {
-        // Fallback for non-secure contexts (HTTP dev server)
         const textArea = document.createElement("textarea");
         textArea.value = publicKey;
         textArea.style.position = "fixed";
@@ -48,13 +50,64 @@ export default function WalletButton() {
         );
       }
 
-      // Show feedback
       setCopyFeedback(true);
       setTimeout(() => setCopyFeedback(false), 1500);
     } catch (err) {
       console.error("[WalletButton] Failed to copy address:", err);
     }
   }, [publicKey]);
+
+  const handleSwitchAccount = useCallback(async () => {
+    try {
+      if (walletType === "freighter") {
+        // Trigger Freighter's account picker
+        await (window as any).freighter.setAllowedHosts(
+          [(window as any).location.hostname],
+          () => {}
+        );
+        // Disconnect and reconnect to trigger account picker
+        disconnect();
+        setTimeout(() => connect("freighter"), 100);
+      } else if (walletType === "walletconnect") {
+        // For WalletConnect, disconnect and reconnect
+        disconnect();
+        setTimeout(() => connect("walletconnect"), 100);
+      }
+      setShowDropdown(false);
+    } catch (err) {
+      console.error("[WalletButton] Failed to switch account:", err);
+    }
+  }, [walletType, disconnect, connect]);
+
+  // Handle outside clicks and Escape key
+  useEffect(() => {
+    const handleClickOutside = (e: MouseEvent) => {
+      if (
+        dropdownRef.current &&
+        !dropdownRef.current.contains(e.target as Node) &&
+        triggerRef.current &&
+        !triggerRef.current.contains(e.target as Node)
+      ) {
+        setShowDropdown(false);
+      }
+    };
+
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (e.key === "Escape") {
+        setShowDropdown(false);
+      }
+    };
+
+    if (showDropdown) {
+      document.addEventListener("mousedown", handleClickOutside);
+      document.addEventListener("keydown", handleKeyDown);
+    }
+
+    return () => {
+      document.removeEventListener("mousedown", handleClickOutside);
+      document.removeEventListener("keydown", handleKeyDown);
+    };
+  }, [showDropdown]);
 
   return (
     <div
@@ -67,76 +120,181 @@ export default function WalletButton() {
       }}
     >
       {connected && publicKey ? (
-        <div style={{ display: "flex", alignItems: "center", gap: "0.75rem" }}>
+        <div style={{ display: "flex", alignItems: "center", gap: "0.75rem", position: "relative" }}>
           <span style={{ fontSize: "0.75rem", color: "var(--text-muted)" }}>
             via {walletType === "walletconnect" ? "WalletConnect" : "Freighter"}
           </span>
-          <div style={{ display: "flex", alignItems: "center", gap: "0.4rem" }}>
+          <button
+            ref={triggerRef}
+            onClick={() => setShowDropdown(!showDropdown)}
+            disabled={txLoading}
+            aria-haspopup="menu"
+            aria-expanded={showDropdown}
+            style={{
+              display: "flex",
+              alignItems: "center",
+              gap: "0.4rem",
+              background: "transparent",
+              border: "1px solid var(--border-input)",
+              color: "var(--text)",
+              padding: "0.3rem 0.7rem",
+              borderRadius: "0.25rem",
+              cursor: "pointer",
+              fontSize: "0.85rem",
+              transition: "all 0.2s ease",
+            }}
+            onMouseEnter={(e) => {
+              e.currentTarget.style.backgroundColor = "var(--bg-hover)";
+            }}
+            onMouseLeave={(e) => {
+              e.currentTarget.style.backgroundColor = "transparent";
+            }}
+          >
             <span
               className="badge badge-green"
               title={publicKey}
-              style={{ cursor: "default" }}
+              style={{ cursor: "default", padding: "0 0.3rem" }}
             >
               {short(publicKey)}
             </span>
-            <button
-              onClick={handleCopyAddress}
-              aria-label="Copy wallet address"
-              title="Copy wallet address"
+            <span style={{ fontSize: "0.75rem" }}>▼</span>
+          </button>
+
+          {showDropdown && (
+            <div
+              ref={dropdownRef}
+              role="menu"
               style={{
-                background: "transparent",
-                border: "none",
-                padding: "0.3rem",
-                cursor: "pointer",
-                color: "var(--text-muted)",
-                fontSize: "0.875rem",
+                position: "absolute",
+                top: "calc(100% + 0.5rem)",
+                right: 0,
+                background: "var(--dropdown-bg)",
+                border: "1px solid var(--border-input)",
+                borderRadius: "0.5rem",
+                padding: "0.5rem",
                 display: "flex",
-                alignItems: "center",
-                justifyContent: "center",
-                height: "1.5rem",
-                width: "1.5rem",
-                borderRadius: "0.25rem",
-                transition: "all 0.2s ease",
-              }}
-              onMouseEnter={(e) => {
-                e.currentTarget.style.backgroundColor = "var(--bg-hover)";
-              }}
-              onMouseLeave={(e) => {
-                e.currentTarget.style.backgroundColor = "transparent";
+                flexDirection: "column",
+                gap: "0",
+                minWidth: "180px",
+                zIndex: 10,
+                boxShadow: "0 4px 6px rgba(0, 0, 0, 0.1)",
               }}
             >
-              {copyFeedback ? (
-                <span style={{ fontSize: "0.65rem", fontWeight: "600" }}>
-                  ✓
-                </span>
-              ) : (
-                <span style={{ fontSize: "0.875rem" }}>📋</span>
-              )}
-            </button>
-          </div>
-          <button
-            className="wallet-button__disconnect"
-            onClick={disconnect}
-            disabled={txLoading}
-            style={{
-              background: "transparent",
-              border: "1px solid var(--border-input)",
-              color: "var(--text-muted)",
-              padding: "0.3rem 0.7rem",
-            }}
-          >
-            {txLoading ? (
-              <span
-                style={{ display: "flex", alignItems: "center", gap: "0.4rem" }}
+              <button
+                role="menuitem"
+                onClick={() => {
+                  handleCopyAddress();
+                  setShowDropdown(false);
+                }}
+                style={{
+                  justifyContent: "flex-start",
+                  gap: "0.5rem",
+                  display: "flex",
+                  alignItems: "center",
+                  padding: "0.5rem 0.75rem",
+                  background: "transparent",
+                  border: "none",
+                  color: "var(--text)",
+                  cursor: "pointer",
+                  fontSize: "0.85rem",
+                  textAlign: "left",
+                  borderRadius: "0.25rem",
+                  transition: "background-color 0.2s ease",
+                }}
+                onMouseEnter={(e) => {
+                  e.currentTarget.style.backgroundColor = "var(--bg-hover)";
+                }}
+                onMouseLeave={(e) => {
+                  e.currentTarget.style.backgroundColor = "transparent";
+                }}
               >
-                <span className="spinner" aria-hidden="true" /> Transaction
-                pending…
-              </span>
-            ) : (
-              "Disconnect"
-            )}
-          </button>
+                {copyFeedback ? (
+                  <>
+                    <span>✓</span>
+                    <span>Copied!</span>
+                  </>
+                ) : (
+                  <>
+                    <span>📋</span>
+                    <span>Copy Address</span>
+                  </>
+                )}
+              </button>
+
+              <button
+                role="menuitem"
+                onClick={handleSwitchAccount}
+                style={{
+                  justifyContent: "flex-start",
+                  gap: "0.5rem",
+                  display: "flex",
+                  alignItems: "center",
+                  padding: "0.5rem 0.75rem",
+                  background: "transparent",
+                  border: "none",
+                  color: "var(--text)",
+                  cursor: "pointer",
+                  fontSize: "0.85rem",
+                  textAlign: "left",
+                  borderRadius: "0.25rem",
+                  transition: "background-color 0.2s ease",
+                }}
+                onMouseEnter={(e) => {
+                  e.currentTarget.style.backgroundColor = "var(--bg-hover)";
+                }}
+                onMouseLeave={(e) => {
+                  e.currentTarget.style.backgroundColor = "transparent";
+                }}
+              >
+                <span>🔄</span>
+                <span>Switch Account</span>
+              </button>
+
+              <button
+                role="menuitem"
+                onClick={() => {
+                  disconnect();
+                  setShowDropdown(false);
+                }}
+                style={{
+                  justifyContent: "flex-start",
+                  gap: "0.5rem",
+                  display: "flex",
+                  alignItems: "center",
+                  padding: "0.5rem 0.75rem",
+                  background: "transparent",
+                  border: "none",
+                  color: "var(--error-text)",
+                  cursor: "pointer",
+                  fontSize: "0.85rem",
+                  textAlign: "left",
+                  borderRadius: "0.25rem",
+                  transition: "background-color 0.2s ease",
+                }}
+                onMouseEnter={(e) => {
+                  e.currentTarget.style.backgroundColor = "var(--error-bg)";
+                }}
+                onMouseLeave={(e) => {
+                  e.currentTarget.style.backgroundColor = "transparent";
+                }}
+              >
+                <span>🚪</span>
+                <span>Disconnect</span>
+              </button>
+            </div>
+          )}
         </div>
+      ) : reconnecting ? (
+        // Automatic reconnect in progress — block user interaction to prevent
+        // duplicate connection attempts racing with the ongoing reconnect flow.
+        <button
+          disabled
+          aria-busy="true"
+          aria-label="Reconnecting wallet"
+          style={{ opacity: 0.7, cursor: "not-allowed" }}
+        >
+          ⟳ Reconnecting…
+        </button>
       ) : (
         <>
           <button

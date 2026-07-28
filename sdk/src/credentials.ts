@@ -760,10 +760,10 @@ export class CredentialClient extends BaseClient {
       throw contractErr;
     }
 
-    return scValToNative(
+    return decodeCredential(
       (result as SorobanRpc.Api.SimulateTransactionSuccessResponse)
         .result!.retval
-    ) as Credential;
+    );
   }
 
   /**
@@ -1358,6 +1358,80 @@ export class CredentialClient extends BaseClient {
     }
 
     return { succeeded, failed };
+  }
+
+  /**
+   * Query credentials by a specific claim key-value pair.
+   *
+   * **IMPORTANT:** This is a client-side filter that fetches all credentials
+   * for the subject and filters them locally. On-chain claim indexing is not
+   * supported due to the opaque storage model — credentials serialize claims
+   * as a single `Map<String, String>` blob without per-claim indexes.
+   *
+   * **Performance caveat:** For subjects with many credentials (hundreds or
+   * thousands), this method will fetch and deserialize every credential before
+   * filtering. The recommended production approach is to index claim data
+   * off-chain via contract event listening and query your own database.
+   *
+   * Use this method only for:
+   * - Development and testing with small credential sets
+   * - One-off queries where off-chain indexing is not available
+   * - Subjects known to have a bounded number of credentials (< 100)
+   *
+   * For production at scale, implement off-chain indexing:
+   * 1. Listen to `credential.issued` events from the contract
+   * 2. Extract and store claim key-value pairs in a queryable database
+   * 3. Query your database directly instead of this method
+   *
+   * @param callerAddress  Stellar address used to build read simulations.
+   * @param subjectAddress The address whose credentials to search.
+   * @param claimKey       The claim key to filter by (e.g., 'country').
+   * @param claimValue     The expected value (e.g., 'NG'). Case-sensitive exact match.
+   * @param options        Per-call overrides (currently `timeoutSeconds`).
+   * @returns Array of {@link Credential} records where `claims[claimKey] === claimValue`.
+   * @throws {SorobanIdentityError} on simulation failure or if the subject has
+   *   no credentials.
+   *
+   * @example
+   * ```ts
+   * // Find all KYC credentials where country=NG
+   * const ngCreds = await credentials.getCredentialsByClaimKey(
+   *   caller,
+   *   subject,
+   *   'country',
+   *   'NG'
+   * );
+   * console.log(`Found ${ngCreds.length} Nigerian KYC records`);
+   * ```
+   */
+  async getCredentialsByClaimKey(
+    callerAddress: string,
+    subjectAddress: string,
+    claimKey: string,
+    claimValue: string,
+    options?: CallOptions
+  ): Promise<Credential[]> {
+    // Fetch all credentials for the subject
+    const allCredentials = await this.getCredentialsBySubject(
+      callerAddress,
+      subjectAddress,
+      options
+    );
+
+    // Client-side filter for matching claim
+    return allCredentials.filter((cred) => {
+      // Convert Map-like claims structure to plain object for easier access
+      const claims = cred.claims as unknown as Map<string, string>;
+      
+      // Handle both native Map and plain object representations
+      if (claims instanceof Map) {
+        return claims.get(claimKey) === claimValue;
+      } else if (typeof claims === 'object') {
+        return (claims as Record<string, string>)[claimKey] === claimValue;
+      }
+      
+      return false;
+    });
   }
 
   /**

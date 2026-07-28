@@ -115,14 +115,14 @@ export class RequestQueue {
       request.resolve(result);
     } catch (error: any) {
       if (this.shouldRetry(error, request)) {
+        const delay = this.getRetryDelay(error, request.retries);
         request.retries++;
-        const delay = this.getRetryDelay(error);
         setTimeout(() => {
           this.queue.unshift(request);
           this.processQueue();
         }, delay);
       } else if (this.is429(error)) {
-        request.reject(new RateLimitError(this.getRetryDelay(error)));
+        request.reject(new RateLimitError(this.getRetryDelay(error, request.retries)));
       } else {
         request.reject(error);
       }
@@ -150,16 +150,31 @@ export class RequestQueue {
     );
   }
 
-  private getRetryDelay(error: any): number {
-    // Check for Retry-After header in 429 responses
-    const errorStr = error?.toString() || '';
-    const retryAfterMatch = errorStr.match(/retry-after:\s*(\d+)/i);
-    
-    if (retryAfterMatch) {
-      return parseInt(retryAfterMatch[1]) * 1000; // Convert to ms
+  private getRetryDelay(error: any, retries: number): number {
+    // Honor a real Retry-After header from the server response, if present
+    const retryAfter = this.extractRetryAfterHeader(error);
+    if (retryAfter != null) {
+      const seconds = Number(retryAfter);
+      if (!Number.isNaN(seconds)) {
+        return seconds * 1000; // Convert to ms
+      }
     }
 
     // Exponential backoff for other errors
-    return this.retryDelay * Math.pow(2, Math.min(3, error.retries || 0));
+    return this.retryDelay * Math.pow(2, Math.min(3, retries));
+  }
+
+  /**
+   * Reads the `Retry-After` header off the error's underlying HTTP response,
+   * supporting both axios-style plain-object headers (as used by
+   * `@stellar/stellar-sdk`) and fetch-style `Headers` objects.
+   */
+  private extractRetryAfterHeader(error: any): string | undefined {
+    const headers = error?.response?.headers ?? error?.headers;
+    if (!headers) return undefined;
+    if (typeof headers.get === 'function') {
+      return headers.get('retry-after') ?? undefined;
+    }
+    return headers['retry-after'] ?? headers['Retry-After'];
   }
 }

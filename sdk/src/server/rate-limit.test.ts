@@ -74,6 +74,53 @@ describe("TokenBucketRateLimiter (#254)", () => {
     });
     expect(limiter.consume("vip", "read").limit).toBe(100);
   });
+
+  it("gives mutually consistent resetAt and retryAfterMs on a 429 (#508)", () => {
+    let now = 1_000;
+    const limiter = new TokenBucketRateLimiter({
+      read: { limit: 2, windowMs: 1000 },
+      now: () => now,
+    });
+    limiter.consume("k", "read");
+    limiter.consume("k", "read");
+    const denied = limiter.consume("k", "read");
+    expect(denied.allowed).toBe(false);
+    expect(denied.retryAfterMs).toBeGreaterThan(0);
+    // resetAt (epoch seconds) must describe the same wait as retryAfterMs —
+    // i.e. resolve to `now + retryAfterMs`, not a separate sliding-window value.
+    const expectedResetAt = Math.ceil((now + denied.retryAfterMs) / 1000);
+    expect(denied.resetAt).toBe(expectedResetAt);
+  });
+
+  // Issue #478 regression: exhausting the read budget must NOT eat into the
+  // write budget — each (key, rateClass) pair gets its own independent bucket.
+  it("read and write budgets are enforced independently per caller (#478)", () => {
+    const now = 1_000;
+    const limiter = new TokenBucketRateLimiter({
+      read:  { limit: 5, windowMs: 60_000 },
+      write: { limit: 2, windowMs: 60_000 },
+      now: () => now,
+    });
+    const caller = "user-abc";
+
+    // Exhaust the entire read budget for this caller.
+    for (let i = 0; i < 5; i++) {
+      expect(limiter.consume(caller, "read").allowed).toBe(true);
+    }
+    // Read bucket is now empty.
+    expect(limiter.consume(caller, "read").allowed).toBe(false);
+
+    // Write budget must be completely intact — reads did not touch it.
+    const w1 = limiter.consume(caller, "write");
+    const w2 = limiter.consume(caller, "write");
+    expect(w1.allowed).toBe(true);
+    expect(w1.limit).toBe(2);
+    expect(w2.allowed).toBe(true);
+
+    // Only after the write limit itself is spent should writes be rejected.
+    const w3 = limiter.consume(caller, "write");
+    expect(w3.allowed).toBe(false);
+  });
 });
 
 describe("createRateLimitMiddleware", () => {

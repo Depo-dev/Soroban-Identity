@@ -5,6 +5,7 @@ import type {
   ReputationRecord,
   ScoreHistoryEntry,
 } from "./types";
+import { assertCredentialType } from "./types";
 
 export function encodeAddress(address: string): xdr.ScVal {
   if (!address) throw new Error("encodeAddress: address must be non-empty");
@@ -35,15 +36,19 @@ export function encodeU32(value: number): xdr.ScVal {
   return nativeToScVal(value, { type: "u32" });
 }
 
-export function encodeU64(value: number): xdr.ScVal {
-  if (!Number.isInteger(value) || value < 0) {
+export function encodeU64(value: number | bigint): xdr.ScVal {
+  if (typeof value === "bigint") {
+    if (value < 0n) {
+      throw new Error("encodeU64: expected a non-negative integer");
+    }
+  } else if (!Number.isInteger(value) || value < 0) {
     throw new Error("encodeU64: expected a non-negative integer");
   }
   return nativeToScVal(value, { type: "u64" });
 }
 
-export function encodeI64(value: number): xdr.ScVal {
-  if (!Number.isInteger(value)) {
+export function encodeI64(value: number | bigint): xdr.ScVal {
+  if (typeof value === "number" && !Number.isInteger(value)) {
     throw new Error("encodeI64: expected an integer");
   }
   return nativeToScVal(value, { type: "i64" });
@@ -66,10 +71,15 @@ export function decodeDidDocument(val: xdr.ScVal): DidDocument {
 
 export function decodeCredential(val: xdr.ScVal): Credential {
   const result = scValToNative(val);
-  if (result == null || typeof result !== "object") {
+  if (result == null || typeof result !== "object" || Array.isArray(result)) {
     throw new Error("decodeCredential: malformed ScVal");
   }
-  return result as Credential;
+
+  const credential = result as Record<string, unknown>;
+  return {
+    ...credential,
+    credentialType: assertCredentialType(credential.credentialType),
+  } as Credential;
 }
 
 export function decodeReputationRecord(val: xdr.ScVal): ReputationRecord {

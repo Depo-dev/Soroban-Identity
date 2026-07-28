@@ -52,7 +52,8 @@ export function useWalletConnection({
   const retryCountRef = useRef<number>(0);
   const currentWalletTypeRef = useRef<WalletType | null>(null);
   const startTimeRef = useRef<number>(0);
-  const timeoutRef = useRef<NodeJS.Timeout | null>(null);
+  const freighterTimeoutRef = useRef<NodeJS.Timeout | null>(null);
+  const walletConnectTimeoutRef = useRef<NodeJS.Timeout | null>(null);
 
   const [isConnecting, setIsConnecting] = useState(false);
   const [error, setError] = useState<WalletConnectionError | string | null>(
@@ -70,7 +71,7 @@ export function useWalletConnection({
       }
 
       if (!window.freighter) {
-        const errorMsg = "Freighter not found. Install it from freighter.app";
+        const errorMsg = "Freighter wallet extension not found. Install it from freighter.app";
         setState((s) => ({
           ...s,
           connecting: false,
@@ -163,7 +164,7 @@ export function useWalletConnection({
             retryCount: attempt,
           }));
           setRetryCount(attempt);
-          timeoutRef.current = setTimeout(async () => {
+          freighterTimeoutRef.current = setTimeout(async () => {
             await connectFreighter(true);
           }, retryDelayMs);
         }
@@ -273,7 +274,7 @@ export function useWalletConnection({
             retryCount: attempt,
           }));
           setRetryCount(attempt);
-          timeoutRef.current = setTimeout(async () => {
+          walletConnectTimeoutRef.current = setTimeout(async () => {
             await connectWalletConnect(true);
           }, retryDelayMs);
         }
@@ -292,19 +293,33 @@ export function useWalletConnection({
 
   useEffect(() => {
     const saved = localStorage.getItem("soroban-wallet-connected");
+    if (!saved) return;
+
+    // Signal the UI that an automatic reconnect is in progress so the button
+    // can show a "Reconnecting…" state instead of the misleading "Connect" label.
+    setState((s) => ({ ...s, reconnecting: true }));
+
+    const finish = () =>
+      setState((s) => ({ ...s, reconnecting: false }));
+
     if (saved === "freighter") {
-      connectFreighter();
+      connectFreighter().finally(finish);
     } else if (saved === "walletconnect") {
-      connectWalletConnect();
+      connectWalletConnect().finally(finish);
+    } else {
+      finish();
     }
-  }, [connectFreighter, connectWalletConnect]);
+  }, [connectFreighter, connectWalletConnect, setState]);
 
   // ── Cleanup ────────────────────────────────────────────────────────────────
 
   useEffect(() => {
     return () => {
-      if (timeoutRef.current) {
-        clearTimeout(timeoutRef.current);
+      if (freighterTimeoutRef.current) {
+        clearTimeout(freighterTimeoutRef.current);
+      }
+      if (walletConnectTimeoutRef.current) {
+        clearTimeout(walletConnectTimeoutRef.current);
       }
     };
   }, []);
@@ -313,6 +328,17 @@ export function useWalletConnection({
 
   const connect = useCallback(
     async (walletType: WalletType = "freighter") => {
+      // Cancel any pending retry timer from a previously abandoned flow so
+      // it can't fire later and clobber the state this call is about to set.
+      if (freighterTimeoutRef.current) {
+        clearTimeout(freighterTimeoutRef.current);
+        freighterTimeoutRef.current = null;
+      }
+      if (walletConnectTimeoutRef.current) {
+        clearTimeout(walletConnectTimeoutRef.current);
+        walletConnectTimeoutRef.current = null;
+      }
+
       setIsConnecting(true);
       setError(null);
       setRetryCount(0);
@@ -337,8 +363,11 @@ export function useWalletConnection({
 
   const disconnect = useCallback(
     async (currentWalletType: WalletType | null) => {
-      if (timeoutRef.current) {
-        clearTimeout(timeoutRef.current);
+      if (freighterTimeoutRef.current) {
+        clearTimeout(freighterTimeoutRef.current);
+      }
+      if (walletConnectTimeoutRef.current) {
+        clearTimeout(walletConnectTimeoutRef.current);
       }
 
       if (
@@ -359,7 +388,7 @@ export function useWalletConnection({
       }
 
       localStorage.removeItem("soroban-wallet-connected");
-      setState(DISCONNECTED_STATE);
+      setState(DISCONNECTED_STATE);  // DISCONNECTED_STATE already has reconnecting: false
       setError(null);
       setRetryCount(0);
       setIsConnecting(false);

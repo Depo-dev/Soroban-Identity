@@ -1,0 +1,78 @@
+name: Fuzz Testing
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  schedule:
+    # Run nightly at 2 AM UTC to catch regressions
+    - cron: '0 2 * * *'
+
+jobs:
+  fuzz:
+    name: Fuzz Contracts
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        target:
+          - fuzz_create_did
+          - fuzz_issue_credential
+          - fuzz_submit_score
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Install Rust nightly
+        uses: dtolnay/rust-toolchain@nightly
+
+      - name: Install cargo-fuzz
+        run: cargo install cargo-fuzz
+
+      - name: Cache cargo registry
+        uses: actions/cache@v3
+        with:
+          path: ~/.cargo/registry
+          key: ${{ runner.os }}-cargo-registry-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Cache cargo index
+        uses: actions/cache@v3
+        with:
+          path: ~/.cargo/git
+          key: ${{ runner.os }}-cargo-index-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Cache fuzz target build
+        uses: actions/cache@v3
+        with:
+          path: fuzz/target
+          key: ${{ runner.os }}-fuzz-target-${{ matrix.target }}-${{ hashFiles('fuzz/Cargo.lock') }}
+
+      - name: Run fuzz target
+        run: |
+          cd fuzz
+          cargo +nightly fuzz run ${{ matrix.target }} -- \
+            -max_total_time=60 \
+            -rss_limit_mb=2048 \
+            -print_final_stats=1
+        timeout-minutes: 3
+
+      - name: Upload crash artifacts
+        if: failure()
+        uses: actions/upload-artifact@v3
+        with:
+          name: fuzz-crash-${{ matrix.target }}
+          path: fuzz/artifacts/${{ matrix.target }}/
+          retention-days: 30
+
+      - name: Report results
+        if: always()
+        run: |
+          echo "Fuzz target: ${{ matrix.target }}"
+          if [ -d "fuzz/artifacts/${{ matrix.target }}" ] && [ "$(ls -A fuzz/artifacts/${{ matrix.target }})" ]; then
+            echo "::error::Crash detected in ${{ matrix.target }}. See artifacts for reproducer."
+            exit 1
+          else
+            echo "::notice::No crashes detected in ${{ matrix.target }}"
+          fi

@@ -30,6 +30,7 @@ import {
   buildResolveDidArgs,
   buildHasActiveDidArgs,
   buildDeactivateDidArgs,
+  buildDidExistsArgs,
 } from "./contract-args";
 
 // Dummy address used for lightweight initialization probes
@@ -387,6 +388,58 @@ export class IdentityClient extends BaseClient {
     const result = await retryWithBackoff(() => this.server.simulateTransaction(tx));
     const isSimulationError = SorobanRpc.Api.isSimulationError(result);
     this.debug('sdk.simulation_result', { operation: 'identity.simulateTransaction', success: !isSimulationError });
+    if (isSimulationError) return false;
+
+    const native = scValToNative(
+      (result as SorobanRpc.Api.SimulateTransactionSuccessResponse)
+        .result!.retval
+    );
+    return typeof native === "boolean" ? native : Boolean(native);
+  }
+
+  /**
+   * Lightweight existence check for a DID, regardless of activation status.
+   *
+   * Returns `true` if a DID document exists for the given address (active or
+   * deactivated), `false` otherwise. This avoids the overhead of calling
+   * `resolveDid` and catching the not-found error when only an existence check
+   * is needed.
+   *
+   * @param controllerAddress The Stellar address to check.
+   * @param options           Per-call overrides (currently `timeoutSeconds`).
+   * @returns `true` if a DID exists (active or deactivated), `false` otherwise.
+   * @throws {SorobanIdentityError} on simulation failure.
+   *
+   * @example
+   * ```ts
+   * const exists = await identity.exists('GABC...');
+   * if (exists) {
+   *   const doc = await identity.resolveDid('GABC...');
+   *   console.log(doc.active ? 'Active' : 'Deactivated');
+   * }
+   * ```
+   */
+  async exists(controllerAddress: string, options?: CallOptions): Promise<boolean> {
+    validateStellarAddress(controllerAddress);
+    const account = new Account(controllerAddress, "0");
+    const timeout = options?.timeoutSeconds ?? this.config.txTimeout ?? 30;
+
+    const tx = new TransactionBuilder(account, {
+      fee: BASE_FEE,
+      networkPassphrase: this.config.networkPassphrase,
+    })
+      .addOperation(
+        this.contract.call(
+          "did_exists",
+          ...buildDidExistsArgs({ controller: controllerAddress })
+        )
+      )
+      .setTimeout(timeout)
+      .build();
+
+    const result = await retryWithBackoff(() => this.server.simulateTransaction(tx));
+    const isSimulationError = SorobanRpc.Api.isSimulationError(result);
+    this.debug('sdk.simulation_result', { operation: 'identity.exists', success: !isSimulationError });
     if (isSimulationError) return false;
 
     const native = scValToNative(

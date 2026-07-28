@@ -1,4 +1,5 @@
 import { SorobanRpc, Transaction } from "@stellar/stellar-sdk";
+import { SorobanIdentityError } from "./errors";
 
 export interface TxOptions {
   pollInterval?: number;
@@ -32,5 +33,8 @@ export async function executeTransaction(
       throw new Error("Transaction failed on-chain");
     }
   }
-  throw new Error("Transaction confirmation timeout");
+  throw new SorobanIdentityError(
+    `Transaction confirmation timeout (hash: ${result.hash}). The transaction was broadcast and may still succeed — check its status via this hash before resubmitting.`,
+    { code: "TIMEOUT", txHash: result.hash }
+  );
 }

@@ -1,10 +1,36 @@
 import path from "node:path";
+import { logger } from './logger.js';
 
 const DEFAULT_DATA_DIR = path.resolve(process.cwd(), "data");
 
-function parseInteger(value, fallback) {
+/**
+ * Parse an integer from a string environment variable value.
+ *
+ * @param {string|undefined} value     - Raw env var string
+ * @param {number}           fallback  - Default when value is absent or invalid
+ * @param {boolean}         [allowZero=false] - When true, 0 is accepted as a
+ *   valid "disabled" sentinel in addition to positive integers. Keys that
+ *   support disable-via-0 (EVENT_POLL_INTERVAL_MS, RPC_MAX_RETRIES,
+ *   SOROBAN_POOL_SIZE) must pass allowZero: true. All other keys require a
+ *   strictly positive integer.
+ */
+function parseInteger(value, fallback, allowZero = false) {
   const parsed = Number.parseInt(value ?? "", 10);
-  return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
+  const isValid = Number.isFinite(parsed) && (allowZero ? parsed >= 0 : parsed > 0);
+  return isValid ? parsed : fallback;
+}
+
+/**
+ * Resolve the Stellar source account from environment variables.
+ * STELLAR_SOURCE_ACCOUNT takes precedence over STELLAR_SECRET_KEY.
+ * Both loadConfig and validateConfig use this helper so they always agree
+ * on which variable is authoritative when both are set.
+ *
+ * @param {Object} env - Environment variable object
+ * @returns {string} The resolved source account, or "" if neither is set
+ */
+function resolveSourceAccount(env) {
+  return env.STELLAR_SOURCE_ACCOUNT ?? env.STELLAR_SECRET_KEY ?? "";
 }
 
 function parseJson(value, fallback) {
@@ -53,21 +79,26 @@ export function loadConfig(env = process.env) {
       env.EXPIRY_JOB_INTERVAL_MS,
       60 * 60 * 1000,
     ),
+    expiryConcurrency: parseInteger(env.EXPIRY_CONCURRENCY, 8),
     notificationWebhookUrl: env.NOTIFICATION_WEBHOOK_URL ?? "",
     subjectNotificationWebhooks: parseJson(
       env.SUBJECT_NOTIFICATION_WEBHOOKS,
       {},
     ),
-    poolSize: parseInteger(env.SOROBAN_POOL_SIZE, 4),
+    // SOROBAN_POOL_SIZE=0 disables the pool (allowZero: true)
+    poolSize: parseInteger(env.SOROBAN_POOL_SIZE, 4, true),
+    sorobanInvokeTimeoutMs: parseInteger(env.SOROBAN_INVOKE_TIMEOUT_MS, 10000),
     stellarCli: env.STELLAR_CLI ?? "stellar",
-    sourceAccount: env.STELLAR_SOURCE_ACCOUNT ?? env.STELLAR_SECRET_KEY ?? "",
+    sourceAccount: resolveSourceAccount(env),
     network: env.STELLAR_NETWORK ?? "testnet",
-    rpcUrl: env.STELLAR_RPC_URL ?? "https://soroban-testnet.stellar.org",
+    rpcUrl: env.STELLAR_RPC_URL ?? env.RPC_URL ?? "https://soroban-testnet.stellar.org",
     rpcCacheTtlMs: parseInteger(env.RPC_CACHE_TTL_MS, 5000),
-    rpcMaxRetries: parseInteger(env.RPC_MAX_RETRIES, 3),
+    // RPC_MAX_RETRIES=0 disables retries (allowZero: true)
+    rpcMaxRetries: parseInteger(env.RPC_MAX_RETRIES, 3, true),
     rpcRetryBaseMs: parseInteger(env.RPC_RETRY_BASE_MS, 500),
     rpcRetryBackoff: parseInteger(env.RPC_RETRY_BACKOFF, 2),
-    eventPollIntervalMs: parseInteger(env.EVENT_POLL_INTERVAL_MS, 5000),
+    // EVENT_POLL_INTERVAL_MS=0 disables the event poller (allowZero: true)
+    eventPollIntervalMs: parseInteger(env.EVENT_POLL_INTERVAL_MS, 5000, true),
     contracts: {
       identity: env.IDENTITY_REGISTRY_ID ?? "",
       credential: env.CREDENTIAL_CONTRACT_ID ?? env.CREDENTIAL_MANAGER_ID ?? "",
@@ -80,7 +111,7 @@ export function validateConfig(env = process.env) {
   const missing = [];
   const invalid = [];
 
-  const sourceAccount = env.STELLAR_SECRET_KEY ?? env.STELLAR_SOURCE_ACCOUNT;
+  const sourceAccount = resolveSourceAccount(env);
   if (!sourceAccount) {
     missing.push("STELLAR_SECRET_KEY: Stellar account secret key (S…)");
   } else {
@@ -109,7 +140,9 @@ export function validateConfig(env = process.env) {
     { key: "PORT", desc: "must be a valid integer" },
     { key: "EXPIRY_WARNING_DAYS", desc: "must be a valid integer" },
     { key: "EXPIRY_JOB_INTERVAL_MS", desc: "must be a valid integer" },
+    { key: "EXPIRY_CONCURRENCY", desc: "must be a valid integer" },
     { key: "SOROBAN_POOL_SIZE", desc: "must be a valid integer" },
+    { key: "SOROBAN_INVOKE_TIMEOUT_MS", desc: "must be a valid integer" },
     { key: "RPC_CACHE_TTL_MS", desc: "must be a valid integer" },
     { key: "RPC_MAX_RETRIES", desc: "must be a valid integer" },
     { key: "RPC_RETRY_BASE_MS", desc: "must be a valid integer" },
@@ -159,9 +192,11 @@ export function logDefaultValues(env = process.env) {
     { key: "DATA_DIR", defaultVal: "data" },
     { key: "EXPIRY_WARNING_DAYS", defaultVal: "7" },
     { key: "EXPIRY_JOB_INTERVAL_MS", defaultVal: "3600000" },
+    { key: "EXPIRY_CONCURRENCY", defaultVal: "8" },
     { key: "NOTIFICATION_WEBHOOK_URL", defaultVal: "''" },
     { key: "SUBJECT_NOTIFICATION_WEBHOOKS", defaultVal: "{}" },
     { key: "SOROBAN_POOL_SIZE", defaultVal: "4" },
+    { key: "SOROBAN_INVOKE_TIMEOUT_MS", defaultVal: "10000" },
     { key: "STELLAR_CLI", defaultVal: "'stellar'" },
     { key: "STELLAR_NETWORK", defaultVal: "'testnet'" },
     {
@@ -183,9 +218,7 @@ export function logDefaultValues(env = process.env) {
       val = env[item.key];
     }
     if (val === undefined || val === "") {
-      console.log(
-        `[config] [INFO] Optional variable ${item.key} is using default value: ${item.defaultVal}`,
-      );
+      logger.info({ variable: item.key, defaultValue: item.defaultVal }, 'Using default config value');
     }
   }
 }

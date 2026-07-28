@@ -1,5 +1,15 @@
 import type React from 'react';
 
+export function formatDate(value: string | number): string {
+  const ms = typeof value === 'number' ? value * 1000 : value;
+  const date = new Date(ms);
+  return new Intl.DateTimeFormat('en-US', {
+    year: 'numeric',
+    month: 'long',
+    day: 'numeric',
+  }).format(date);
+}
+
 export function formatTimestamp(unix: number): string {
   if (unix === 0) return 'No expiry';
   return new Intl.DateTimeFormat('en-US', {
