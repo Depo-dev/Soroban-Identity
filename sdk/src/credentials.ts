@@ -42,6 +42,7 @@ import { BaseClient } from "./base-client";
 import {
   buildIssueCredentialArgs,
   buildRevokeCredentialArgs,
+  buildRevokeBatchArgs,
   buildVerifyCredentialArgs,
   buildGetCredentialArgs,
   buildGetSubjectCredentialsArgs,
@@ -493,6 +494,73 @@ export class CredentialClient extends BaseClient {
       const credential = await this.getCredential(issuerKeypair.publicKey(), credentialId, options);
       const revokedCredential: RevokedCredential = { ...credential, revokedAt, status: 'revoked' };
       return { data: revokedCredential, txHash };
+    } catch (e) {
+      throw wrapError(e);
+    }
+  }
+
+  /**
+   * Atomically revoke multiple credentials in a single transaction.
+   * Maximum batch size is 50 — larger batches throw `BATCH_TOO_LARGE` before
+   * submitting the transaction to the network.
+   * Only the registered issuer of **all** credentials in the batch can call this.
+   *
+   * @param issuerKeypair - The issuer keypair that originally issued the credentials.
+   * @param ids           - Array of hex-encoded credential IDs (32 bytes each) to revoke.
+   * @param reason        - Short symbol string describing the revocation reason.
+   * @param options       - Per-call overrides (currently `timeoutSeconds`).
+   * @returns `{ txHash }` once the batch revocation transaction is confirmed.
+   * @throws {SorobanIdentityError} with code `BATCH_TOO_LARGE` if `ids.length > 50`.
+   * @throws {SorobanIdentityError} with code `NOT_FOUND` if any credential does not exist.
+   * @throws {SorobanIdentityError} with code `UNAUTHORIZED` if the issuer is not
+   *   authorised to revoke every credential in the batch.
+   */
+  async revokeBatch(
+    issuerKeypair: Keypair,
+    ids: string[],
+    reason: string,
+    options?: CallOptions
+  ): Promise<WriteResult> {
+    if (ids.length > 50) {
+      throw new SorobanIdentityError(
+        `Batch size ${ids.length} exceeds maximum of 50`,
+        'BATCH_TOO_LARGE'
+      );
+    }
+    const account = await this.server.getAccount(issuerKeypair.publicKey());
+    const timeout = options?.timeoutSeconds ?? this.config.txTimeout ?? 30;
+    const idBuffers = ids.map((id) => Buffer.from(id, 'hex'));
+
+    const tx = new TransactionBuilder(account, {
+      fee: BASE_FEE,
+      networkPassphrase: this.config.networkPassphrase,
+    })
+      .addOperation(
+        this.contract.call(
+          'revoke_credentials_batch',
+          ...buildRevokeBatchArgs({
+            issuer: issuerKeypair.publicKey(),
+            credentialIds: idBuffers,
+            reason,
+          })
+        )
+      )
+      .setTimeout(timeout)
+      .build();
+
+    try {
+      const prepared = await retryWithBackoff(() => this.server.prepareTransaction(tx));
+      prepared.sign(issuerKeypair);
+
+      const result = await retryWithBackoff(() => this.server.sendTransaction(prepared));
+      this.debug('sdk.submission_outcome', { operation: 'credentials.revokeBatch', status: result.status });
+      if (result.status !== 'PENDING') {
+        throw new SorobanIdentityError(`Transaction failed: ${result.status}`, 'CONTRACT_ERROR');
+      }
+
+      const txHash = result.hash;
+      await pollTransactionStatus(this.server, txHash);
+      return { txHash };
     } catch (e) {
       throw wrapError(e);
     }
