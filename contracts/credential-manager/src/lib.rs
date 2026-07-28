@@ -52,6 +52,9 @@ pub enum ContractError {
     /// invocation (which is mid cross-contract call) had not yet completed.
     ReentrantCall = 14,
     SubjectHasNoDid = 14,
+    /// Issue #602: more than 50 credential IDs were passed to
+    /// `revoke_credentials_batch`, which exceeds the per-call instruction budget.
+    BatchTooLarge = 15,
 }
 
 // ── Data types ────────────────────────────────────────────────────────────────
@@ -340,6 +343,35 @@ impl CredentialManager {
         Ok(())
     }
 
+    /// Atomically revoke multiple credentials in a single transaction.
+    ///
+    /// Issue #602: batch revocation endpoint capped at 50 IDs to stay within
+    /// Soroban instruction limits. Any invalid credential ID (not found, already
+    /// revoked, or issued by a different issuer) causes the entire transaction to
+    /// fail — no partial revocations are written.
+    ///
+    /// # Errors
+    /// - [`ContractError::BatchTooLarge`] if `ids` contains more than 50 entries.
+    /// - [`ContractError::CredentialNotFound`] if any ID does not exist in storage.
+    /// - [`ContractError::UnauthorizedIssuer`] if any credential was not issued by
+    ///   `issuer`.
+    /// - [`ContractError::CredentialRevoked`] if any credential is already revoked.
+    pub fn revoke_credentials_batch(
+        env: Env,
+        issuer: Address,
+        ids: Vec<BytesN<32>>,
+        reason: Symbol,
+    ) -> Result<(), ContractError> {
+        issuer.require_auth();
+        if ids.len() > 50 {
+            return Err(ContractError::BatchTooLarge);
+        }
+        for id in ids.iter() {
+            Self::revoke_one(&env, &issuer, &id, &reason)?;
+        }
+        Ok(())
+    }
+
     pub fn expire_credential(env: Env, caller: Address, credential_id: BytesN<32>) -> Result<(), ContractError> {
         caller.require_auth();
         let key = Self::cred_key(&credential_id);
@@ -499,6 +531,38 @@ impl CredentialManager {
     }
 
     // ── Helpers ───────────────────────────────────────────────────────────────
+
+    /// Core single-credential revocation logic shared by [`Self::revoke_credential`]
+    /// and [`Self::revoke_credentials_batch`]. Caller must have already called
+    /// `issuer.require_auth()`.
+    fn revoke_one(
+        env: &Env,
+        issuer: &Address,
+        credential_id: &BytesN<32>,
+        reason: &Symbol,
+    ) -> Result<(), ContractError> {
+        let key = Self::cred_key(credential_id);
+        let mut cred: Credential = env
+            .storage()
+            .persistent()
+            .get(&key)
+            .ok_or(ContractError::CredentialNotFound)?;
+        if &cred.issuer != issuer {
+            return Err(ContractError::UnauthorizedIssuer);
+        }
+        if cred.revoked {
+            return Err(ContractError::CredentialRevoked);
+        }
+        cred.revoked = true;
+        env.storage().persistent().set(&key, &cred);
+        let revoked: u32 = env.storage().instance().get(&REVOKED_CNT).unwrap_or(0);
+        env.storage().instance().set(&REVOKED_CNT, &(revoked + 1));
+        env.events().publish(
+            (CRED, symbol_short!("revoked")),
+            (EVENT_VERSION, credential_id.clone(), issuer.clone(), reason.clone()),
+        );
+        Ok(())
+    }
 
     fn require_uninitialized(env: &Env) -> Result<(), ContractError> {
         if env.storage().instance().has(&ADMIN) {

@@ -150,6 +150,26 @@ export function buildRevokeCredentialArgs(params: {
 }
 
 /**
+ * Build args for `revoke_credentials_batch(issuer, ids, reason)`.
+ *
+ * @param params.issuer        Registered issuer address (must sign the tx).
+ * @param params.credentialIds Array of 32-byte credential ID buffers to revoke.
+ * @param params.reason        Short symbol string describing the revocation reason.
+ * @returns ScVal array ready for `contract.call('revoke_credentials_batch', ...)`.
+ */
+export function buildRevokeBatchArgs(params: {
+  issuer: string;
+  credentialIds: Buffer[];
+  reason: string;
+}): xdr.ScVal[] {
+  return [
+    nativeToScVal(params.issuer, { type: 'address' }),
+    xdr.ScVal.scvVec(params.credentialIds.map((id) => nativeToScVal(id, { type: 'bytes' }))),
+    nativeToScVal(params.reason, { type: 'symbol' }),
+  ];
+}
+
+/**
  * Build args for `verify_credential(credential_id)`.
  *
  * @param params.credentialId 32-byte credential ID buffer.
