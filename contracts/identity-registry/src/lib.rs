@@ -9,7 +9,6 @@ use soroban_sdk::xdr::ToXdr;
 pub const CONTRACT_VERSION: u32 = 1;
 const EVENT_VERSION: u32 = 1;
 
-mod keys;
 
 // ── Storage keys ──────────────────────────────────────────────────────────────
 
@@ -132,7 +131,6 @@ impl IdentityRegistry {
             (symbol_short!("admin"), symbol_short!("xfer")),
             (old_admin, proposed),
         );
-        env.events().publish((ADMIN, symbol_short!("accepted")), (EVENT_VERSION, old_admin, proposed));
         Ok(())
     }
 
@@ -223,7 +221,7 @@ impl IdentityRegistry {
         storage.extend_ttl(&key, TTL_LEDGERS, TTL_LEDGERS);
         let mut hash_input = Self::string_to_bytes(&env, &doc.id);
         hash_input.extend_from_array(&doc.updated_at.to_be_bytes());
-        let meta_hash = env.crypto().sha256(&hash_input).to_bytes();
+        let meta_hash: BytesN<32> = env.crypto().sha256(&hash_input).into();
         env.events().publish((IDENTITY, symbol_short!("updated")), (EVENT_VERSION, controller, meta_hash));
         Ok(())
     }
@@ -290,7 +288,7 @@ impl IdentityRegistry {
         env.storage().instance().set(&DID_COUNT, &(count + 1));
 
         env.events().publish(
-            (IDENTITY, symbol_short!("reactivated")),
+            (IDENTITY, Symbol::new(&env, "reactivated")),
             (EVENT_VERSION, controller, doc.updated_at),
         );
         Ok(())
@@ -400,7 +398,7 @@ impl IdentityRegistry {
 
     fn did_key(env: &Env, controller: &Address) -> (Symbol, BytesN<32>) {
         let key_bytes = env.crypto().sha256(&controller.clone().to_xdr(env));
-        (IDENTITY, key_bytes)
+        (IDENTITY, key_bytes.into())
     }
 
     fn build_did_string(env: &Env, controller: &Address) -> String {
@@ -414,7 +412,7 @@ impl IdentityRegistry {
         String::from_bytes(env, &result)
     }
 
-    pub fn validate_did_format(env: &Env, did: &String) -> bool {
+    fn validate_did_format(env: &Env, did: &String) -> bool {
         if did.len() != 68 { return false; }
         let did_bytes = Self::string_to_bytes(env, did);
         for (i, expected) in DID_STELLAR_PREFIX.iter().enumerate() {

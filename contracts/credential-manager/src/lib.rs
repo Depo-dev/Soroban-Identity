@@ -32,6 +32,12 @@ const TTL_MAX: u32 = 6_312_000;
 const TTL_MIN: u32 = 17_280;
 const PAGE_CAP: u32 = 100;
 
+/// Issue #532: admin-governance override for the issuer registry cap.
+/// Storage key holding the admin-configured maximum issuer count, and the
+/// absolute ceiling that override may never exceed.
+const MAX_ISSUERS_KEY: Symbol = symbol_short!("MAXISSKY");
+const ABSOLUTE_MAX_ISSUERS: u32 = 10_000;
+
 #[contracterror]
 #[derive(Clone, Debug, PartialEq, Copy)]
 pub enum ContractError {
@@ -51,7 +57,7 @@ pub enum ContractError {
     /// Issue #551: a guarded function was re-entered while a prior
     /// invocation (which is mid cross-contract call) had not yet completed.
     ReentrantCall = 14,
-    SubjectHasNoDid = 14,
+    SubjectHasNoDid = 15,
 }
 
 // ── Data types ────────────────────────────────────────────────────────────────
@@ -616,6 +622,7 @@ mod tests {
     use super::*;
     use soroban_sdk::{testutils::{Address as _, Ledger as _}, Bytes, Env, Map, String};
 
+    #[contract]
     struct MockIdentityRegistry;
     #[contractimpl]
     impl MockIdentityRegistry {
@@ -829,17 +836,27 @@ mod tests {
     fn test_error_variants() {
         let (env, admin, client) = setup();
 
-        assert_eq!(client.try_initialize(&admin), Err(Ok(CredentialError::AlreadyInitialized)));
+        let registry_id = env.register_contract(None, MockIdentityRegistry);
+        assert_eq!(
+            client.try_initialize(&admin, &registry_id),
+            Err(Ok(ContractError::AlreadyInitialized))
+        );
 
         let fake_id = BytesN::from_array(&env, &[1u8; 32]);
-        assert_eq!(client.try_get_credential(&fake_id), Err(Ok(CredentialError::NotFound)));
+        assert_eq!(
+            client.try_get_credential(&fake_id).err(),
+            Some(Ok(ContractError::CredentialNotFound))
+        );
 
         let rando = Address::generate(&env);
         let claims: Map<String, String> = Map::new(&env);
+        let claims_hash = BytesN::from_array(&env, &[1u8; 32]);
         let sig = Bytes::from_array(&env, &[0u8; 64]);
         assert_eq!(
-            client.try_issue_credential(&rando, &rando, &CredentialType::Kyc, &claims, &sig, &0u64),
-            Err(Ok(CredentialError::NotAnIssuer))
+            client.try_issue_credential(
+                &rando, &rando, &CredentialType::Kyc, &claims, &claims_hash, &sig, &0u64, &None,
+            ),
+            Err(Ok(ContractError::UnauthorizedIssuer))
         );
     }
 
