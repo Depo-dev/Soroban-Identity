@@ -180,6 +180,9 @@ impl CredentialManager {
         Self::require_admin(&env)?;
         let mut issuers = Self::get_issuers_internal(&env);
         if !issuers.contains(&issuer) {
+            if issuers.len() >= Self::effective_max_issuers(&env) {
+                return Err(ContractError::MaxIssuersReached);
+            }
             if issuers.len() >= MAX_ISSUERS { return Err(ContractError::MaxIssuersReached); }
             issuers.push_back(issuer.clone());
             env.storage().instance().set(&ISSUER, &issuers);
@@ -519,6 +522,32 @@ impl CredentialManager {
             return Err(ContractError::UnauthorizedIssuer);
         }
         Ok(())
+    }
+
+    /// Admin-only governance override for the issuer registry cap (Issue #532).
+    ///
+    /// `new_max` must not exceed [`ABSOLUTE_MAX_ISSUERS`]. Emits
+    /// `admin_config_changed` on success.
+    pub fn set_max_issuers(env: Env, admin: Address, new_max: u32) -> Result<(), ContractError> {
+        Self::require_admin(&env)?;
+        if new_max == 0 || new_max > ABSOLUTE_MAX_ISSUERS {
+            return Err(ContractError::MaxIssuersReached);
+        }
+        env.storage().instance().set(&MAX_ISSUERS_KEY, &new_max);
+        env.events().publish(
+            (symbol_short!("admin"), symbol_short!("cfgchg")),
+            (EVENT_VERSION, admin, new_max),
+        );
+        Ok(())
+    }
+
+    /// Current effective issuer cap: the admin-configured value if set via
+    /// [`Self::set_max_issuers`], otherwise the default [`MAX_ISSUERS`].
+    fn effective_max_issuers(env: &Env) -> u32 {
+        env.storage()
+            .instance()
+            .get(&MAX_ISSUERS_KEY)
+            .unwrap_or(MAX_ISSUERS)
     }
 
     fn get_issuers_internal(env: &Env) -> Vec<Address> {
