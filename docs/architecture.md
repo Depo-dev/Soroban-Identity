@@ -69,6 +69,54 @@ Issuer                Subject               Verifier
   │                     │                      │◀─ true / false
 ```
 
+## Credential Lifecycle
+
+Every credential moves through these states. All transitions are permanent except the implicit re-issuance path for a previously revoked credential.
+
+```mermaid
+stateDiagram-v2
+    [*] --> ACTIVE : issue_credential(issuer, subject, ...)\n[actor: registered issuer]
+
+    ACTIVE --> REVOKED : revoke_credential(issuer, credential_id)\n[actor: issuing issuer]
+    ACTIVE --> EXPIRED : expire_credential(caller, credential_id)\n[actor: any caller, after expires_at]
+    ACTIVE --> ACTIVE : verify_credential(credential_id)\n[actor: any — extends TTL]
+
+    REVOKED --> ACTIVE : issue_credential(issuer, subject, ...)\n[actor: registered issuer — re-issues after revocation]
+
+    EXPIRED --> [*] : terminal — storage TTL winds down to TTL_MIN
+    REVOKED --> [*] : terminal — storage retained until ledger expiry
+```
+
+**Notes:**
+- `expires_at = 0` means the credential never expires; only `revoke_credential` can terminate it.
+- `expire_credential` is a permissionless sweep — any address can call it once the ledger timestamp exceeds `expires_at`.
+- Re-issuance after revocation creates a new credential with a fresh `issued_at`; the revoked record remains in storage.
+- `verify_credential` is read-only but bumps the persistent-storage TTL to keep the record alive.
+
+## DID Lifecycle
+
+A DID document is owned by its `controller` (the Stellar wallet that created it). Only the admin can reactivate a deactivated DID.
+
+```mermaid
+stateDiagram-v2
+    [*] --> ACTIVE : create_did(controller, metadata)\n[actor: controller]
+
+    ACTIVE --> ACTIVE : update_did(controller, metadata)\n[actor: controller — updates metadata + updated_at]
+    ACTIVE --> ACTIVE : add_service(controller, service)\n[actor: controller — appends service endpoint]
+    ACTIVE --> ACTIVE : remove_service(controller, service_id)\n[actor: controller — removes service endpoint]
+    ACTIVE --> DEACTIVATED : deactivate_did(controller)\n[actor: controller]
+
+    DEACTIVATED --> ACTIVE : reactivate_did(admin, controller)\n[actor: admin only]
+    DEACTIVATED --> DEACTIVATED : did_exists(controller) → true\n[read-only — DID record is retained]
+```
+
+**Notes:**
+- `resolve_did` and `has_active_did` are read-only and only succeed on `ACTIVE` DIDs.
+- `did_exists` returns `true` for both `ACTIVE` and `DEACTIVATED` states — it checks presence without deserialising the document.
+- Deactivation decrements the active DID counter; reactivation increments it.
+- Service endpoints (`add_service` / `remove_service`) are only permitted on `ACTIVE` DIDs; attempting either on a `DEACTIVATED` DID returns `DidDeactivated`.
+- A controller address can only hold one DID. `create_did` returns `DidAlreadyExists` if a document already exists for the address.
+
 ## Cross-Contract Calls & Reentrancy (Issue #551)
 
 Soroban's execution model prevents classic EVM-style reentrancy at the host
