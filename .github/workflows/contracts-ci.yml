@@ -9,6 +9,10 @@ on:
 
 env:
   CARGO_TERM_COLOR: always
+  # WASM size budgets in bytes (64KB default for all contracts)
+  IDENTITY_REGISTRY_SIZE_BUDGET: 65536
+  CREDENTIAL_MANAGER_SIZE_BUDGET: 65536
+  REPUTATION_SIZE_BUDGET: 65536
 
 jobs:
   lint:
@@ -114,6 +118,15 @@ jobs:
       - name: Test reputation
         working-directory: contracts/reputation
         run: cargo test
+
+      - name: Check WASM size budgets
+        run: |
+          chmod +x scripts/check_wasm_size.sh
+          scripts/check_wasm_size.sh
+        env:
+          IDENTITY_REGISTRY_SIZE_BUDGET: ${{ env.IDENTITY_REGISTRY_SIZE_BUDGET }}
+          CREDENTIAL_MANAGER_SIZE_BUDGET: ${{ env.CREDENTIAL_MANAGER_SIZE_BUDGET }}
+          REPUTATION_SIZE_BUDGET: ${{ env.REPUTATION_SIZE_BUDGET }}
 
   post-deployment-health-check:
     name: Post-deployment Health Check
