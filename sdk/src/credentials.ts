@@ -773,6 +773,49 @@ export class CredentialClient extends BaseClient {
   }
 
   /**
+   * Find credentials issued to a subject that contain a specific claim key/value pair.
+   *
+   * **Performance caveat:** Claim values are not indexed on-chain. This method
+   * fetches all credentials for the subject via {@link CredentialClient.getCredentialsBySubject}
+   * and filters them client-side. For subjects with many credentials, prefer
+   * building an off-chain index using contract events (`CRED.issued`).
+   *
+   * @param callerAddress  Stellar address used to build the read simulations.
+   * @param subjectAddress The subject whose credentials to search.
+   * @param claimKey       The claim key to match (case-sensitive).
+   * @param claimValue     The expected claim value (case-sensitive).
+   * @param options        Per-call overrides (currently `timeoutSeconds`).
+   * @returns Array of {@link Credential} records where `claims[claimKey] === claimValue`.
+   * @throws {SorobanIdentityError} on simulation failure.
+   *
+   * @example
+   * ```ts
+   * // Find all KYC credentials where country=NG
+   * const results = await credentials.getCredentialsByClaimKey(
+   *   caller,
+   *   subject,
+   *   'country',
+   *   'NG'
+   * );
+   * ```
+   */
+  async getCredentialsByClaimKey(
+    callerAddress: string,
+    subjectAddress: string,
+    claimKey: string,
+    claimValue: string,
+    options?: CallOptions
+  ): Promise<Credential[]> {
+    validateStellarAddress(callerAddress);
+    validateStellarAddress(subjectAddress);
+    const all = await this.getCredentialsBySubject(callerAddress, subjectAddress, options);
+    return all.filter((cred) => {
+      const claims = cred.claims as Record<string, string>;
+      return claims[claimKey] === claimValue;
+    });
+  }
+
+  /**
    * Get a credential by ID.
    *
    * Read-only simulation. Use {@link CredentialClient.verifyCredential} if you
