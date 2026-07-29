@@ -1,6 +1,7 @@
 export { IdentityClient } from "./identity";
 export { CredentialClient } from "./credentials";
 export { ReputationClient } from "./reputation";
+import type { SorobanIdentityConfig } from "./types";
 export { SorobanIdentityError, parseContractError } from "./errors";
 export type { SorobanErrorCode } from "./errors";
 export * as v1 from './v1';
@@ -91,6 +92,7 @@ export type {
   SorobanIdentityConfig,
   ReputationRecord,
   ScoreHistoryEntry,
+  AccountInfo,
 } from "./types";
 export { executeTransaction } from "./transaction";
 export type { TxOptions } from "./transaction";

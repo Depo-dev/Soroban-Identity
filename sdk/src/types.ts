@@ -340,3 +340,22 @@ export class SimulationError extends Error {
     this.name = 'SimulationError';
   }
 }
+
+/**
+ * Minimal account information required to build an offline transaction.
+ *
+ * Obtain `sequence` from Horizon or Soroban RPC before disconnecting from the
+ * network, then pass both fields to
+ * {@link BaseClient.buildUnsignedTransaction}.
+ */
+export interface AccountInfo {
+  /** Stellar public key (G-address) of the signing account. */
+  publicKey: string;
+  /**
+   * Current account sequence number as a decimal string.
+   *
+   * Fetch this value once while online (e.g. via `server.getAccount(publicKey)`)
+   * and cache it for offline transaction assembly.
+   */
+  sequence: string;
+}
