@@ -57,3 +57,17 @@ Persistent data is keyed by short `Symbol` namespaces (for example `IDENTITY`,
 constants at the top of `src/lib.rs` so keys are grep-friendly and cannot be
 accidentally duplicated. Unit tests in each crate assert that namespace symbols
 and byte-string prefixes (where used) are pairwise distinct.
+
+## Migration notes
+
+### credential-manager: credential IDs now include an issuance nonce (#467)
+
+`derive_id` used to hash only `issuer || subject || type`, so re-issuing a
+credential of the same type to the same subject after a revocation silently
+overwrote the original storage record at the same ID. IDs are now derived as
+`sha256(issuer_xdr || subject_xdr || type_tag || nonce)`, where `nonce` is a
+per-`(issuer, subject, type)` issuance counter tracked in a new `ISSNONCE`
+storage entry. Any credential ID computed or cached before this change (e.g.
+in off-chain indexes or Verifiable Presentations) corresponds to `nonce = 1`
+and must be recomputed accordingly; existing on-chain records are unaffected
+since storage keys are unchanged for already-issued credentials.

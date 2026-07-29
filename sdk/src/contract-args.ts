@@ -85,6 +85,18 @@ export function buildDeactivateDidArgs(params: {
   return [nativeToScVal(params.controller, { type: 'address' })];
 }
 
+/**
+ * Build args for `did_exists(controller)`.
+ *
+ * @param params.controller Stellar address to check for DID existence.
+ * @returns ScVal array ready for `contract.call('did_exists', ...)`.
+ */
+export function buildDidExistsArgs(params: {
+  controller: string;
+}): xdr.ScVal[] {
+  return [nativeToScVal(params.controller, { type: 'address' })];
+}
+
 // ── credential-manager ───────────────────────────────────────────────────────
 
 /**
@@ -134,6 +146,26 @@ export function buildRevokeCredentialArgs(params: {
   return [
     nativeToScVal(params.issuer, { type: 'address' }),
     nativeToScVal(params.credentialId, { type: 'bytes' }),
+  ];
+}
+
+/**
+ * Build args for `revoke_credentials_batch(issuer, ids, reason)`.
+ *
+ * @param params.issuer        Registered issuer address (must sign the tx).
+ * @param params.credentialIds Array of 32-byte credential ID buffers to revoke.
+ * @param params.reason        Short symbol string describing the revocation reason.
+ * @returns ScVal array ready for `contract.call('revoke_credentials_batch', ...)`.
+ */
+export function buildRevokeBatchArgs(params: {
+  issuer: string;
+  credentialIds: Buffer[];
+  reason: string;
+}): xdr.ScVal[] {
+  return [
+    nativeToScVal(params.issuer, { type: 'address' }),
+    xdr.ScVal.scvVec(params.credentialIds.map((id) => nativeToScVal(id, { type: 'bytes' }))),
+    nativeToScVal(params.reason, { type: 'symbol' }),
   ];
 }
 
@@ -284,12 +316,14 @@ export function buildGetReputationArgs(params: {
 }
 
 /**
- * Build args for `get_history(subject, reporter, offset, limit)`.
+ * Build args for `get_history(subject, reporter, offset, limit, from_timestamp, to_timestamp)`.
  *
- * @param params.subject   Stellar address of the credential subject.
- * @param params.reporter  Registered reporter address.
- * @param params.offset    Number of entries to skip (offset-based pagination).
- * @param params.limit     Maximum entries to return.
+ * @param params.subject        Stellar address of the credential subject.
+ * @param params.reporter       Registered reporter address.
+ * @param params.offset         Number of entries to skip (offset-based pagination).
+ * @param params.limit          Maximum entries to return.
+ * @param params.fromTimestamp  Optional minimum timestamp filter (Unix seconds).
+ * @param params.toTimestamp    Optional maximum timestamp filter (Unix seconds).
  * @returns ScVal array ready for `contract.call('get_history', ...)`.
  */
 export function buildGetHistoryArgs(params: {
@@ -297,12 +331,20 @@ export function buildGetHistoryArgs(params: {
   reporter: string;
   offset: number;
   limit: number;
+  fromTimestamp?: number;
+  toTimestamp?: number;
 }): xdr.ScVal[] {
   return [
     nativeToScVal(params.subject, { type: 'address' }),
     nativeToScVal(params.reporter, { type: 'address' }),
     nativeToScVal(params.offset, { type: 'u32' }),
     nativeToScVal(params.limit, { type: 'u32' }),
+    params.fromTimestamp !== undefined
+      ? nativeToScVal({ Some: params.fromTimestamp }, { type: { Some: ['u64'] } as never })
+      : nativeToScVal(null, { type: 'option' }),
+    params.toTimestamp !== undefined
+      ? nativeToScVal({ Some: params.toTimestamp }, { type: { Some: ['u64'] } as never })
+      : nativeToScVal(null, { type: 'option' }),
   ];
 }
 

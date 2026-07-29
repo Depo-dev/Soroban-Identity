@@ -131,13 +131,11 @@ export class ExpiryNotificationJob {
     this.soroban = soroban;
     this.timer = null;
     this.nextLedger = Number.parseInt(process.env.EXPIRY_EVENTS_START_LEDGER ?? '0', 10);
-    this.concurrency = Number.parseInt(process.env.EXPIRY_CONCURRENCY ?? '8', 10);
-    
-    // Ensure concurrency is at least 1
-    if (this.concurrency < 1) {
-      logger.warn({ original: this.concurrency, clamped: 1 }, 'EXPIRY_CONCURRENCY too low, clamping to 1');
-      this.concurrency = 1;
-    }
+
+    // Use the validated value from config rather than re-parsing the env var
+    // inline. config.expiryConcurrency has already been through parseInteger's
+    // NaN/< 1 guards, so we only need to enforce a floor of 1 here.
+    this.concurrency = Math.max(1, config.expiryConcurrency ?? 8);
     
     logger.info({ concurrency: this.concurrency }, 'Expiry notification job concurrency configured');
   }

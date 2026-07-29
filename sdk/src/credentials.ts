@@ -42,6 +42,7 @@ import { BaseClient } from "./base-client";
 import {
   buildIssueCredentialArgs,
   buildRevokeCredentialArgs,
+  buildRevokeBatchArgs,
   buildVerifyCredentialArgs,
   buildGetCredentialArgs,
   buildGetSubjectCredentialsArgs,
@@ -499,6 +500,73 @@ export class CredentialClient extends BaseClient {
   }
 
   /**
+   * Atomically revoke multiple credentials in a single transaction.
+   * Maximum batch size is 50 — larger batches throw `BATCH_TOO_LARGE` before
+   * submitting the transaction to the network.
+   * Only the registered issuer of **all** credentials in the batch can call this.
+   *
+   * @param issuerKeypair - The issuer keypair that originally issued the credentials.
+   * @param ids           - Array of hex-encoded credential IDs (32 bytes each) to revoke.
+   * @param reason        - Short symbol string describing the revocation reason.
+   * @param options       - Per-call overrides (currently `timeoutSeconds`).
+   * @returns `{ txHash }` once the batch revocation transaction is confirmed.
+   * @throws {SorobanIdentityError} with code `BATCH_TOO_LARGE` if `ids.length > 50`.
+   * @throws {SorobanIdentityError} with code `NOT_FOUND` if any credential does not exist.
+   * @throws {SorobanIdentityError} with code `UNAUTHORIZED` if the issuer is not
+   *   authorised to revoke every credential in the batch.
+   */
+  async revokeBatch(
+    issuerKeypair: Keypair,
+    ids: string[],
+    reason: string,
+    options?: CallOptions
+  ): Promise<WriteResult> {
+    if (ids.length > 50) {
+      throw new SorobanIdentityError(
+        `Batch size ${ids.length} exceeds maximum of 50`,
+        'BATCH_TOO_LARGE'
+      );
+    }
+    const account = await this.server.getAccount(issuerKeypair.publicKey());
+    const timeout = options?.timeoutSeconds ?? this.config.txTimeout ?? 30;
+    const idBuffers = ids.map((id) => Buffer.from(id, 'hex'));
+
+    const tx = new TransactionBuilder(account, {
+      fee: BASE_FEE,
+      networkPassphrase: this.config.networkPassphrase,
+    })
+      .addOperation(
+        this.contract.call(
+          'revoke_credentials_batch',
+          ...buildRevokeBatchArgs({
+            issuer: issuerKeypair.publicKey(),
+            credentialIds: idBuffers,
+            reason,
+          })
+        )
+      )
+      .setTimeout(timeout)
+      .build();
+
+    try {
+      const prepared = await retryWithBackoff(() => this.server.prepareTransaction(tx));
+      prepared.sign(issuerKeypair);
+
+      const result = await retryWithBackoff(() => this.server.sendTransaction(prepared));
+      this.debug('sdk.submission_outcome', { operation: 'credentials.revokeBatch', status: result.status });
+      if (result.status !== 'PENDING') {
+        throw new SorobanIdentityError(`Transaction failed: ${result.status}`, 'CONTRACT_ERROR');
+      }
+
+      const txHash = result.hash;
+      await pollTransactionStatus(this.server, txHash);
+      return { txHash };
+    } catch (e) {
+      throw wrapError(e);
+    }
+  }
+
+  /**
    * Validate `claims` against the schema identified by `schemaId`.
    * Uses `ajv` for JSON Schema validation. Throws `ClaimsValidationError`
    * on failure.
@@ -749,6 +817,17 @@ export class CredentialClient extends BaseClient {
       const error: string = (result as { error: string }).error ?? "";
       const contractErr = ContractError.extract(error, CREDENTIAL_MANAGER_ERRORS);
       if (!contractErr) {
+        const lower = error.toLowerCase();
+        if (
+          lower.includes("credentialnotfound") ||
+          lower.includes("credential not found") ||
+          lower.includes("not found")
+        ) {
+          throw new SorobanIdentityError(
+            `Credential not found: ${credentialId}`,
+            "NOT_FOUND"
+          );
+        }
         throw new SorobanIdentityError(`Simulation failed: ${error}`, "CONTRACT_ERROR");
       }
       if (contractErr.code === CREDENTIAL_NOT_FOUND_CODE) {
@@ -1358,6 +1437,80 @@ export class CredentialClient extends BaseClient {
     }
 
     return { succeeded, failed };
+  }
+
+  /**
+   * Query credentials by a specific claim key-value pair.
+   *
+   * **IMPORTANT:** This is a client-side filter that fetches all credentials
+   * for the subject and filters them locally. On-chain claim indexing is not
+   * supported due to the opaque storage model — credentials serialize claims
+   * as a single `Map<String, String>` blob without per-claim indexes.
+   *
+   * **Performance caveat:** For subjects with many credentials (hundreds or
+   * thousands), this method will fetch and deserialize every credential before
+   * filtering. The recommended production approach is to index claim data
+   * off-chain via contract event listening and query your own database.
+   *
+   * Use this method only for:
+   * - Development and testing with small credential sets
+   * - One-off queries where off-chain indexing is not available
+   * - Subjects known to have a bounded number of credentials (< 100)
+   *
+   * For production at scale, implement off-chain indexing:
+   * 1. Listen to `credential.issued` events from the contract
+   * 2. Extract and store claim key-value pairs in a queryable database
+   * 3. Query your database directly instead of this method
+   *
+   * @param callerAddress  Stellar address used to build read simulations.
+   * @param subjectAddress The address whose credentials to search.
+   * @param claimKey       The claim key to filter by (e.g., 'country').
+   * @param claimValue     The expected value (e.g., 'NG'). Case-sensitive exact match.
+   * @param options        Per-call overrides (currently `timeoutSeconds`).
+   * @returns Array of {@link Credential} records where `claims[claimKey] === claimValue`.
+   * @throws {SorobanIdentityError} on simulation failure or if the subject has
+   *   no credentials.
+   *
+   * @example
+   * ```ts
+   * // Find all KYC credentials where country=NG
+   * const ngCreds = await credentials.getCredentialsByClaimKey(
+   *   caller,
+   *   subject,
+   *   'country',
+   *   'NG'
+   * );
+   * console.log(`Found ${ngCreds.length} Nigerian KYC records`);
+   * ```
+   */
+  async getCredentialsByClaimKey(
+    callerAddress: string,
+    subjectAddress: string,
+    claimKey: string,
+    claimValue: string,
+    options?: CallOptions
+  ): Promise<Credential[]> {
+    // Fetch all credentials for the subject
+    const allCredentials = await this.getCredentialsBySubject(
+      callerAddress,
+      subjectAddress,
+      options
+    );
+
+    // Client-side filter for matching claim
+    return allCredentials.filter((cred) => {
+      // Convert Map-like claims structure to plain object for easier access
+      const claims = cred.claims as unknown as Map<string, string>;
+      
+      // Handle both native Map and plain object representations
+      if (claims instanceof Map) {
+        return claims.get(claimKey) === claimValue;
+      } else if (typeof claims === 'object') {
+        return (claims as Record<string, string>)[claimKey] === claimValue;
+      }
+      
+      return false;
+    });
   }
 
   /**

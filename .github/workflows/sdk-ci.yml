@@ -7,6 +7,32 @@ on:
     branches: [main]
 
 jobs:
+  sdk-lint:
+    name: SDK — lint
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node.js 18
+        uses: actions/setup-node@v4
+        with:
+          node-version: 18
+          cache: npm
+          cache-dependency-path: sdk/package-lock.json
+
+      - name: Install dependencies
+        working-directory: sdk
+        run: npm ci
+
+      - name: Lint
+        working-directory: sdk
+        run: npm run lint
+
+      - name: Format check
+        working-directory: sdk
+        run: npm run format:check
+
   sdk:
     name: SDK — build & test
     runs-on: ubuntu-latest
@@ -36,6 +62,32 @@ jobs:
       - name: Test
         working-directory: sdk
         run: npm test
+
+  frontend-lint:
+    name: Frontend — lint
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node.js 18
+        uses: actions/setup-node@v4
+        with:
+          node-version: 18
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install frontend dependencies
+        working-directory: frontend
+        run: npm ci
+
+      - name: Lint
+        working-directory: frontend
+        run: npm run lint
+
+      - name: Format check
+        working-directory: frontend
+        run: npm run format:check
 
   frontend-typecheck:
     name: Frontend — type check

@@ -5,6 +5,7 @@ import { SorobanIdentityError } from "./errors";
 /**
  * Retries an async function with exponential backoff on transient network errors.
  * Contract-level errors (non-network) are NOT retried.
+ * SorobanIdentityError is always treated as terminal (never retried).
  *
  * @param fn          - Async function to execute.
  * @param maxRetries  - Maximum number of retry attempts (default: 3).
@@ -72,6 +73,7 @@ export async function pollTransactionStatus(
 }
 
 function isTransientError(err: unknown): boolean {
+  if (err instanceof SorobanIdentityError) return false;
   if (!(err instanceof Error)) return false;
   const msg = err.message.toLowerCase();
   return (
