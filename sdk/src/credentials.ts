@@ -1545,4 +1545,47 @@ export class CredentialClient extends BaseClient {
       (result as SorobanRpc.Api.SimulateTransactionSuccessResponse).result!.retval
     ) as number;
   }
+
+  /**
+   * Returns all revoked credential IDs for the given issuer.
+   *
+   * Closes #553: because on-chain `verify_credential` results must not be
+   * cached indefinitely, consumers can call this method periodically (or
+   * subscribe to `credential_revoked` events via {@link SorobanEventListener})
+   * to detect newly-revoked credentials and invalidate local caches.
+   *
+   * The list is derived by iterating the issuer's on-chain credential index
+   * and filtering for entries where `revoked === true`. For large issuers
+   * use the paginated form via {@link CredentialClient.listIssuerCredentials}
+   * and filter client-side, or subscribe to the `credential_revoked` event
+   * stream for push-based invalidation.
+   *
+   * @param callerAddress  Any valid Stellar address (used as the fee-payer account).
+   * @param issuerAddress  The issuer whose revocation list to fetch.
+   * @param options        Per-call overrides (currently `timeoutSeconds`).
+   * @returns Array of hex-encoded 32-byte credential IDs that have been revoked.
+   *
+   * @example
+   * ```ts
+   * // closes #553 — re-verify or invalidate any locally-cached result for these IDs
+   * const revoked = await credentials.getRevocationList(caller, issuerAddress);
+   * for (const id of revoked) {
+   *   cache.invalidate(id);
+   * }
+   * ```
+   */
+  async getRevocationList(
+    callerAddress: string,
+    issuerAddress: string,
+    options?: CallOptions
+  ): Promise<string[]> {
+    validateStellarAddress(issuerAddress);
+    // Fetch all credentials for this issuer and return the revoked IDs.
+    // Closes #553: consumers must re-verify or subscribe to credential_revoked
+    // events rather than cache verify_credential results indefinitely.
+    const allCredentials = await this.getCredentialsByIssuer(callerAddress, issuerAddress, options);
+    return allCredentials
+      .filter((cred) => cred.revoked)
+      .map((cred) => cred.id);
+  }
 }

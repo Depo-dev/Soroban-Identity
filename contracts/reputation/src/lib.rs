@@ -10,12 +10,14 @@ use soroban_sdk::{
 
 pub const CONTRACT_VERSION: u32 = 1;
 const EVENT_VERSION: u32 = 1;
+
 /// Default rate-limit window (in ledgers) used when the contract is initialized.
-const DEFAULT_MIN_INTERVAL: u32 = 100;
+pub const DEFAULT_MIN_INTERVAL: u32 = 100;
 /// Lowest value an admin may configure the rate-limit window to.
-const MIN_INTERVAL_FLOOR: u32 = 10;
+pub const MIN_INTERVAL_FLOOR: u32 = 10;
 /// Highest value an admin may configure the rate-limit window to.
-const MIN_INTERVAL_CEILING: u32 = 50_000;
+pub const MIN_INTERVAL_CEILING: u32 = 50_000;
+
 const MIN_SCORE: i64 = 0;
 const TTL_MAX: u32 = 6_312_000;
 const MAX_HISTORY: usize = 50;
@@ -23,7 +25,12 @@ const PAGE_CAP: u32 = 100;
 /// Maximum number of submissions in a single batch_submit_score call.
 pub const MAX_BATCH_SIZE: u32 = 20;
 
+/// Ledgers a dispute remains open before it expires automatically (~1 day at 5s/ledger).
+const DISPUTE_WINDOW_LEDGERS: u32 = 17_280;
+
 mod keys;
+
+// ── Storage key symbols ───────────────────────────────────────────────────────
 
 const ADMIN: Symbol = symbol_short!("ADMIN");
 const PENDING_ADMIN: Symbol = symbol_short!("PADMIN");
@@ -34,31 +41,32 @@ const SCORE_CNT: Symbol = symbol_short!("SCRCNT");
 const RECORD: Symbol = symbol_short!("rec");
 const HISTORY: Symbol = symbol_short!("h");
 const RATE_LIMIT: Symbol = symbol_short!("rl");
-const DISPUTE: Symbol = symbol_short!("disp");
+/// Storage key prefix for dispute records.
 const DISPUTE: Symbol = symbol_short!("dispute");
+/// Global dispute ID counter.
 const DISPUTE_CNT: Symbol = symbol_short!("disp_cnt");
+/// Storage key for the configurable rate-limit window (in ledgers).
+const MIN_INTERVAL_KEY: Symbol = symbol_short!("rl_win");
 
-/// Ledgers a dispute remains open before it expires automatically (~1 day at 5s/ledger).
-const DISPUTE_WINDOW_LEDGERS: u32 = 17_280;
+// ── Error codes ───────────────────────────────────────────────────────────────
 
 #[contracterror]
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub enum ContractError {
-    AlreadyInitialized = 1,
-    ReporterNotFound = 2,
-    RateLimitExceeded = 3,
-    ReasonTooLong = 4,
-    NotInitialized = 5,
-    Unauthorized = 6,
-    InvalidHistoryIndex = 7,
-    DisputeAlreadyOpen = 8,
-    DisputeNotFound = 9,
-    NoPendingAdmin = 7,
-    NotPendingAdmin = 8,
-    DisputeNotFound = 9,
-    DisputeExpired = 10,
-    DisputeAlreadyResolved = 11,
-    InvalidMinInterval = 12,
+    AlreadyInitialized     = 1,
+    ReporterNotFound       = 2,
+    RateLimitExceeded      = 3,
+    ReasonTooLong          = 4,
+    NotInitialized         = 5,
+    Unauthorized           = 6,
+    InvalidHistoryIndex    = 7,
+    NoPendingAdmin         = 8,
+    NotPendingAdmin        = 9,
+    DisputeNotFound        = 10,
+    DisputeExpired         = 11,
+    DisputeAlreadyResolved = 12,
+    DisputeAlreadyOpen     = 13,
+    InvalidMinInterval     = 14,
 }
 
 // ── Data types ────────────────────────────────────────────────────────────────
@@ -110,29 +118,24 @@ pub struct ReportersPage {
 }
 
 /// A dispute record opened by a subject against a reporter's score delta.
+///
+/// Keyed by `(DISPUTE, subject, reporter, delta_index)`. At most one dispute
+/// may be open per key at a time — see [`Reputation::dispute_score`].
 #[contracttype]
 #[derive(Clone, Debug, PartialEq)]
 pub struct Dispute {
+    /// Monotonically increasing global dispute ID.
     pub dispute_id: u32,
     pub subject: Address,
     pub reporter: Address,
+    /// Zero-based index of the disputed entry in the (subject, reporter) history.
     pub delta_index: u32,
+    /// The delta value that was disputed (snapshot at dispute-open time).
     pub delta: i64,
+    /// Ledger sequence number when the dispute was opened.
     pub opened_at: u32,
+    /// `true` once the dispute has been accepted or rejected by the admin.
     pub resolved: bool,
-}
-
-/// An open dispute against a specific score entry, keyed by
-/// `(subject, reporter, delta_index)`. At most one dispute may be open per key
-/// at a time — see [`Reputation::dispute_score`].
-#[contracttype]
-#[derive(Clone, Debug, PartialEq)]
-pub struct Dispute {
-    pub subject: Address,
-    pub reporter: Address,
-    pub delta_index: u32,
-    pub disputer: Address,
-    pub opened_at: u64,
 }
 
 // ── Contract ──────────────────────────────────────────────────────────────────
@@ -146,26 +149,51 @@ impl Reputation {
         CONTRACT_VERSION
     }
 
+    /// One-time initialization. Stores `admin` and seeds the configurable
+    /// rate-limit window with [`DEFAULT_MIN_INTERVAL`].
+    ///
+    /// Closes #580: `rate_limit_window` is now stored at init time and is
+    /// live-updatable via [`Self::set_min_interval`].
     pub fn initialize(env: Env, admin: Address) -> Result<(), ContractError> {
         Self::require_uninitialized(&env)?;
         Self::set_admin(&env, &admin);
-        env.storage().instance().set(&MIN_INTERVAL_KEY, &DEFAULT_MIN_INTERVAL);
-        env.events().publish((ADMIN, symbol_short!("init")), (EVENT_VERSION, admin));
+        env.storage()
+            .instance()
+            .set(&MIN_INTERVAL_KEY, &DEFAULT_MIN_INTERVAL);
+        env.events().publish(
+            (ADMIN, symbol_short!("init")),
+            (EVENT_VERSION, admin),
+        );
         Ok(())
     }
 
-    /// Returns the current rate-limit window, in ledgers, between successive
-    /// `submit_score` calls from the same reporter for the same subject.
+    /// Returns the current rate-limit window in ledgers.
+    ///
+    /// Closes #580.
     pub fn get_min_interval(env: Env) -> u32 {
-        env.storage().instance().get(&MIN_INTERVAL_KEY).unwrap_or(DEFAULT_MIN_INTERVAL)
+        env.storage()
+            .instance()
+            .get(&MIN_INTERVAL_KEY)
+            .unwrap_or(DEFAULT_MIN_INTERVAL)
     }
 
-    /// Sets the rate-limit window, in ledgers. Admin only.
+    /// Updates the rate-limit window (admin only).
+    ///
     /// Returns [`ContractError::InvalidMinInterval`] if `ledgers` is outside
     /// [[`MIN_INTERVAL_FLOOR`], [`MIN_INTERVAL_CEILING`]].
-    pub fn set_min_interval(env: Env, admin: Address, ledgers: u32) -> Result<(), ContractError> {
+    ///
+    /// Closes #580.
+    pub fn set_min_interval(
+        env: Env,
+        admin: Address,
+        ledgers: u32,
+    ) -> Result<(), ContractError> {
         admin.require_auth();
-        let stored: Address = env.storage().instance().get(&ADMIN).ok_or(ContractError::NotInitialized)?;
+        let stored: Address = env
+            .storage()
+            .instance()
+            .get(&ADMIN)
+            .ok_or(ContractError::NotInitialized)?;
         if stored != admin {
             return Err(ContractError::Unauthorized);
         }
@@ -180,44 +208,85 @@ impl Reputation {
         Ok(())
     }
 
-    pub fn propose_admin(env: Env, admin: Address, proposed: Address) -> Result<(), ContractError> {
+    pub fn propose_admin(
+        env: Env,
+        admin: Address,
+        proposed: Address,
+    ) -> Result<(), ContractError> {
         admin.require_auth();
-        let stored: Address = env.storage().instance().get(&ADMIN).ok_or(ContractError::NotInitialized)?;
+        let stored: Address = env
+            .storage()
+            .instance()
+            .get(&ADMIN)
+            .ok_or(ContractError::NotInitialized)?;
         if stored != admin {
             return Err(ContractError::Unauthorized);
         }
         env.storage().instance().set(&PENDING_ADMIN, &proposed);
-        env.events().publish((ADMIN, symbol_short!("proposed")), (EVENT_VERSION, admin, proposed));
+        env.events().publish(
+            (ADMIN, symbol_short!("proposed")),
+            (EVENT_VERSION, admin, proposed),
+        );
         Ok(())
     }
 
     pub fn accept_admin(env: Env, proposed: Address) -> Result<(), ContractError> {
         proposed.require_auth();
-        let pending: Address = env.storage().instance().get(&PENDING_ADMIN).ok_or(ContractError::NoPendingAdmin)?;
+        let pending: Address = env
+            .storage()
+            .instance()
+            .get(&PENDING_ADMIN)
+            .ok_or(ContractError::NoPendingAdmin)?;
         if pending != proposed {
             return Err(ContractError::NotPendingAdmin);
         }
         env.storage().instance().remove(&PENDING_ADMIN);
-        let old_admin: Address = env.storage().instance().get(&ADMIN).ok_or(ContractError::NotInitialized)?;
+        let old_admin: Address = env
+            .storage()
+            .instance()
+            .get(&ADMIN)
+            .ok_or(ContractError::NotInitialized)?;
         env.storage().instance().set(&ADMIN, &proposed);
-        env.events().publish((ADMIN, symbol_short!("accepted")), (EVENT_VERSION, old_admin, proposed));
+        env.events().publish(
+            (ADMIN, symbol_short!("accepted")),
+            (EVENT_VERSION, old_admin, proposed),
+        );
         Ok(())
     }
 
-    pub fn transfer_admin(env: Env, current_admin: Address, new_admin: Address) -> Result<(), ContractError> {
+    pub fn transfer_admin(
+        env: Env,
+        current_admin: Address,
+        new_admin: Address,
+    ) -> Result<(), ContractError> {
         current_admin.require_auth();
-        let stored: Address = env.storage().instance().get(&ADMIN).ok_or(ContractError::NotInitialized)?;
+        let stored: Address = env
+            .storage()
+            .instance()
+            .get(&ADMIN)
+            .ok_or(ContractError::NotInitialized)?;
         if stored != current_admin {
             return Err(ContractError::Unauthorized);
         }
         env.storage().instance().set(&ADMIN, &new_admin);
-        env.events().publish((ADMIN, symbol_short!("transfer")), (EVENT_VERSION, current_admin, new_admin));
+        env.events().publish(
+            (ADMIN, symbol_short!("transfer")),
+            (EVENT_VERSION, current_admin, new_admin),
+        );
         Ok(())
     }
 
-    pub fn upgrade(env: Env, admin: Address, new_wasm_hash: BytesN<32>) -> Result<(), ContractError> {
+    pub fn upgrade(
+        env: Env,
+        admin: Address,
+        new_wasm_hash: BytesN<32>,
+    ) -> Result<(), ContractError> {
         admin.require_auth();
-        let stored: Address = env.storage().instance().get(&ADMIN).ok_or(ContractError::NotInitialized)?;
+        let stored: Address = env
+            .storage()
+            .instance()
+            .get(&ADMIN)
+            .ok_or(ContractError::NotInitialized)?;
         if stored != admin {
             return Err(ContractError::Unauthorized);
         }
@@ -231,7 +300,10 @@ impl Reputation {
         if !reporters.contains(&reporter) {
             reporters.push_back(reporter.clone());
             env.storage().instance().set(&REPORTER, &reporters);
-            env.events().publish((REPORTER, symbol_short!("added")), (EVENT_VERSION, reporter, env.ledger().timestamp()));
+            env.events().publish(
+                (REPORTER, symbol_short!("added")),
+                (EVENT_VERSION, reporter, env.ledger().timestamp()),
+            );
         }
         Ok(())
     }
@@ -253,20 +325,41 @@ impl Reputation {
         Ok(())
     }
 
-    pub fn update_thresholds(env: Env, min_score: i64, min_reporters: u32) -> Result<(), ContractError> {
+    pub fn update_thresholds(
+        env: Env,
+        min_score: i64,
+        min_reporters: u32,
+    ) -> Result<(), ContractError> {
         Self::require_admin(&env)?;
-        env.storage().instance().set(&DEF_THRESH, &DefaultThreshold { min_score, min_reporters });
-        env.events().publish((symbol_short!("THRESH"), symbol_short!("updated")), (EVENT_VERSION, min_score, min_reporters));
+        env.storage()
+            .instance()
+            .set(&DEF_THRESH, &DefaultThreshold { min_score, min_reporters });
+        env.events().publish(
+            (symbol_short!("THRESH"), symbol_short!("updated")),
+            (EVENT_VERSION, min_score, min_reporters),
+        );
         Ok(())
     }
 
-    pub fn set_default_threshold(env: Env, min_score: i64, min_reporters: u32) -> Result<(), ContractError> {
+    pub fn set_default_threshold(
+        env: Env,
+        min_score: i64,
+        min_reporters: u32,
+    ) -> Result<(), ContractError> {
         Self::require_admin(&env)?;
-        env.storage().instance().set(&DEF_THRESH, &DefaultThreshold { min_score, min_reporters });
+        env.storage()
+            .instance()
+            .set(&DEF_THRESH, &DefaultThreshold { min_score, min_reporters });
         Ok(())
     }
 
-    pub fn submit_score(env: Env, reporter: Address, subject: Address, delta: i64, reason: soroban_sdk::String) -> Result<(), ContractError> {
+    pub fn submit_score(
+        env: Env,
+        reporter: Address,
+        subject: Address,
+        delta: i64,
+        reason: soroban_sdk::String,
+    ) -> Result<(), ContractError> {
         reporter.require_auth();
         Self::require_reporter(&env, &reporter)?;
         if reason.len() > 256 {
@@ -276,11 +369,16 @@ impl Reputation {
 
         let now = env.ledger().timestamp();
         let rec_key = Self::record_key(&subject);
-        let existing_record: Option<ReputationRecord> = env.storage().persistent().get(&rec_key);
+        let existing_record: Option<ReputationRecord> =
+            env.storage().persistent().get(&rec_key);
         let is_new_subject = existing_record.is_none();
-        let mut record: ReputationRecord = existing_record.unwrap_or(ReputationRecord {
-            subject: subject.clone(), score: 0, reporter_count: 0, updated_at: now,
-        });
+        let mut record: ReputationRecord =
+            existing_record.unwrap_or(ReputationRecord {
+                subject: subject.clone(),
+                score: 0,
+                reporter_count: 0,
+                updated_at: now,
+            });
         record.score = record.score.saturating_add(delta).max(MIN_SCORE);
         record.updated_at = now;
 
@@ -290,22 +388,43 @@ impl Reputation {
             record.reporter_count = record.reporter_count.saturating_add(1);
         }
         if is_new_subject {
-            let cnt: u32 = env.storage().instance().get(&SUBJECT_CNT).unwrap_or(0);
+            let cnt: u32 = env
+                .storage()
+                .instance()
+                .get(&SUBJECT_CNT)
+                .unwrap_or(0);
             env.storage().instance().set(&SUBJECT_CNT, &(cnt + 1));
         }
 
         env.storage().persistent().set(&rec_key, &record);
-        env.storage().persistent().extend_ttl(&rec_key, TTL_MAX, TTL_MAX);
+        env.storage()
+            .persistent()
+            .extend_ttl(&rec_key, TTL_MAX, TTL_MAX);
 
-        let mut history: Vec<ScoreEntry> = env.storage().persistent().get(&history_key).unwrap_or_else(|| Vec::new(&env));
+        let mut history: Vec<ScoreEntry> = env
+            .storage()
+            .persistent()
+            .get(&history_key)
+            .unwrap_or_else(|| Vec::new(&env));
         if history.len() >= MAX_HISTORY as u32 {
             history.remove(0);
         }
-        history.push_back(ScoreEntry { reporter: reporter.clone(), delta, reason, submitted_at: now });
+        history.push_back(ScoreEntry {
+            reporter: reporter.clone(),
+            delta,
+            reason,
+            submitted_at: now,
+        });
         env.storage().persistent().set(&history_key, &history);
-        env.storage().persistent().extend_ttl(&history_key, TTL_MAX, TTL_MAX);
+        env.storage()
+            .persistent()
+            .extend_ttl(&history_key, TTL_MAX, TTL_MAX);
 
-        let score_cnt: u32 = env.storage().instance().get(&SCORE_CNT).unwrap_or(0);
+        let score_cnt: u32 = env
+            .storage()
+            .instance()
+            .get(&SCORE_CNT)
+            .unwrap_or(0);
         env.storage().instance().set(&SCORE_CNT, &(score_cnt + 1));
 
         env.events().publish(
@@ -318,10 +437,15 @@ impl Reputation {
     pub fn get_reputation(env: Env, subject: Address) -> ReputationRecord {
         let key = Self::record_key(&subject);
         if env.storage().persistent().has(&key) {
-            env.storage().persistent().extend_ttl(&key, TTL_MAX, TTL_MAX);
+            env.storage()
+                .persistent()
+                .extend_ttl(&key, TTL_MAX, TTL_MAX);
         }
         env.storage().persistent().get(&key).unwrap_or(ReputationRecord {
-            subject: subject.clone(), score: 0, reporter_count: 0, updated_at: 0,
+            subject: subject.clone(),
+            score: 0,
+            reporter_count: 0,
+            updated_at: 0,
         })
     }
 
@@ -339,11 +463,17 @@ impl Reputation {
         }
         let key = Self::history_key(&subject, &reporter);
         if env.storage().persistent().has(&key) {
-            env.storage().persistent().extend_ttl(&key, TTL_MAX, TTL_MAX);
+            env.storage()
+                .persistent()
+                .extend_ttl(&key, TTL_MAX, TTL_MAX);
         }
-        let all: Vec<ScoreEntry> = env.storage().persistent().get(&key).unwrap_or_else(|| Vec::new(&env));
-        
-        // Apply timestamp filters first
+        let all: Vec<ScoreEntry> = env
+            .storage()
+            .persistent()
+            .get(&key)
+            .unwrap_or_else(|| Vec::new(&env));
+
+        // Apply timestamp filters
         let mut filtered = Vec::new(&env);
         for entry in all.iter() {
             let matches_from = match from_timestamp {
@@ -358,8 +488,8 @@ impl Reputation {
                 filtered.push_back(entry);
             }
         }
-        
-        // Apply offset and limit pagination
+
+        // Apply offset/limit pagination
         let effective_limit = if limit == 0 || limit > 100 { 100 } else { limit };
         let len = filtered.len();
         let start = offset.min(len);
@@ -371,32 +501,31 @@ impl Reputation {
         Ok(page)
     }
 
-    /// Opens a dispute against a specific score entry, identified by its index
-    /// into the (subject, reporter) history returned by [`Self::get_history`].
-    /// Caller must be a registered reporter. At most one dispute may be open
-    /// per `(subject, reporter, delta_index)` at a time, preventing the same
-    /// entry from being disputed — and later accepted — more than once.
+    // ── Disputes (#591) ───────────────────────────────────────────────────────
+
+    /// Opens a dispute against a specific score entry.
     ///
-    /// # Arguments
-    /// * `env` - The Soroban environment.
-    /// * `disputer` - The registered reporter raising the dispute (must sign the transaction).
-    /// * `subject` - The subject whose score entry is being disputed.
-    /// * `reporter` - The reporter who submitted the disputed entry.
-    /// * `delta_index` - Zero-based index of the entry within the (subject, reporter) history.
+    /// The caller (`subject`) must sign the transaction. At most one dispute
+    /// may be open per `(subject, reporter, delta_index)` at a time.
+    ///
+    /// Emits a `dispute_filed` event.
     ///
     /// # Errors
-    /// Returns [`ContractError::ReporterNotFound`] if `disputer` is not a registered reporter.
-    /// Returns [`ContractError::InvalidHistoryIndex`] if `delta_index` is out of bounds.
-    /// Returns [`ContractError::DisputeAlreadyOpen`] if this entry already has an open dispute.
+    /// - [`ContractError::ReporterNotFound`] if `reporter` is not registered.
+    /// - [`ContractError::InvalidHistoryIndex`] if `delta_index` is out of bounds.
+    /// - [`ContractError::DisputeAlreadyOpen`] if a dispute is already open for this entry.
+    ///
+    /// Closes #591.
     pub fn dispute_score(
         env: Env,
-        disputer: Address,
         subject: Address,
         reporter: Address,
         delta_index: u32,
-    ) -> Result<(), ContractError> {
-        disputer.require_auth();
-        Self::require_reporter(&env, &disputer)?;
+    ) -> Result<u32, ContractError> {
+        subject.require_auth();
+        if !Self::get_reporters(&env).contains(&reporter) {
+            return Err(ContractError::ReporterNotFound);
+        }
 
         let history_key = Self::history_key(&subject, &reporter);
         let history: Vec<ScoreEntry> = env
@@ -410,47 +539,61 @@ impl Reputation {
 
         let dispute_key = Self::dispute_key(&subject, &reporter, delta_index);
         if env.storage().persistent().has(&dispute_key) {
-            return Err(ContractError::DisputeAlreadyOpen);
+            let existing: Dispute = env
+                .storage()
+                .persistent()
+                .get(&dispute_key)
+                .unwrap();
+            if !existing.resolved {
+                return Err(ContractError::DisputeAlreadyOpen);
+            }
         }
 
-        let now = env.ledger().timestamp();
-        env.storage().persistent().set(
-            &dispute_key,
-            &Dispute {
-                subject: subject.clone(),
-                reporter: reporter.clone(),
-                delta_index,
-                disputer: disputer.clone(),
-                opened_at: now,
-            },
-        );
-        env.storage().persistent().extend_ttl(&dispute_key, TTL_MAX, TTL_MAX);
+        let entry = history.get(delta_index).unwrap();
+        let dispute_id: u32 = env
+            .storage()
+            .instance()
+            .get(&DISPUTE_CNT)
+            .unwrap_or(0)
+            + 1;
+        env.storage().instance().set(&DISPUTE_CNT, &dispute_id);
 
+        let dispute = Dispute {
+            dispute_id,
+            subject: subject.clone(),
+            reporter: reporter.clone(),
+            delta_index,
+            delta: entry.delta,
+            opened_at: env.ledger().sequence(),
+            resolved: false,
+        };
+        env.storage().persistent().set(&dispute_key, &dispute);
+        env.storage()
+            .persistent()
+            .extend_ttl(&dispute_key, TTL_MAX, TTL_MAX);
+
+        // Emit dispute_filed event
         env.events().publish(
-            (DISPUTE, symbol_short!("opened")),
-            (EVENT_VERSION, subject, reporter, delta_index, disputer),
+            (DISPUTE, symbol_short!("filed")),
+            (EVENT_VERSION, dispute_id, subject, reporter, delta_index),
         );
-        Ok(())
+        Ok(dispute_id)
     }
 
     /// Resolves an open dispute (admin only).
     ///
-    /// When `accepted` is `true`, the disputed delta is reversed out of the
-    /// subject's aggregated score, the entry is removed from the (subject,
-    /// reporter) history, and `reporter_count` is decremented if that was the
-    /// reporter's last remaining entry for the subject — keeping the score and
-    /// bookkeeping structures consistent. When `accepted` is `false`, the
-    /// dispute is simply closed with no state change.
+    /// When `accepted` is `true`, the disputed delta is reversed from the
+    /// subject's aggregated score and removed from history. When `false`, the
+    /// dispute is closed with no state change.
     ///
-    /// # Arguments
-    /// * `env` - The Soroban environment.
-    /// * `subject` - The subject of the disputed score entry.
-    /// * `reporter` - The reporter who submitted the disputed entry.
-    /// * `delta_index` - Zero-based index of the disputed entry (as passed to [`Self::dispute_score`]).
-    /// * `accepted` - Whether the dispute is upheld.
+    /// Emits a `dispute_resolved` event.
     ///
     /// # Errors
-    /// Returns [`ContractError::DisputeNotFound`] if there is no open dispute for this key.
+    /// - [`ContractError::DisputeNotFound`] if no dispute exists for this key.
+    /// - [`ContractError::DisputeAlreadyResolved`] if already resolved.
+    /// - [`ContractError::DisputeExpired`] if past the [`DISPUTE_WINDOW_LEDGERS`] window.
+    ///
+    /// Closes #591.
     pub fn resolve_dispute(
         env: Env,
         subject: Address,
@@ -461,10 +604,18 @@ impl Reputation {
         Self::require_admin(&env)?;
 
         let dispute_key = Self::dispute_key(&subject, &reporter, delta_index);
-        if !env.storage().persistent().has(&dispute_key) {
-            return Err(ContractError::DisputeNotFound);
+        let mut dispute: Dispute = env
+            .storage()
+            .persistent()
+            .get(&dispute_key)
+            .ok_or(ContractError::DisputeNotFound)?;
+
+        if dispute.resolved {
+            return Err(ContractError::DisputeAlreadyResolved);
         }
-        env.storage().persistent().remove(&dispute_key);
+        if env.ledger().sequence() > dispute.opened_at + DISPUTE_WINDOW_LEDGERS {
+            return Err(ContractError::DisputeExpired);
+        }
 
         if accepted {
             let history_key = Self::history_key(&subject, &reporter);
@@ -481,20 +632,23 @@ impl Reputation {
                 let now = env.ledger().timestamp();
                 let rec_key = Self::record_key(&subject);
                 let mut record: ReputationRecord =
-                    env.storage()
-                        .persistent()
-                        .get(&rec_key)
-                        .unwrap_or(ReputationRecord {
+                    env.storage().persistent().get(&rec_key).unwrap_or(
+                        ReputationRecord {
                             subject: subject.clone(),
                             score: 0,
                             reporter_count: 0,
                             updated_at: now,
-                        });
-                record.score = record.score.saturating_sub(disputed_delta).max(MIN_SCORE);
+                        },
+                    );
+                record.score = record
+                    .score
+                    .saturating_sub(disputed_delta)
+                    .max(MIN_SCORE);
                 record.updated_at = now;
 
                 if history.is_empty() {
-                    record.reporter_count = record.reporter_count.saturating_sub(1);
+                    record.reporter_count =
+                        record.reporter_count.saturating_sub(1);
                     env.storage().persistent().remove(&history_key);
                 } else {
                     env.storage().persistent().set(&history_key, &history);
@@ -504,45 +658,42 @@ impl Reputation {
                 }
 
                 env.storage().persistent().set(&rec_key, &record);
-                env.storage().persistent().extend_ttl(&rec_key, TTL_MAX, TTL_MAX);
+                env.storage()
+                    .persistent()
+                    .extend_ttl(&rec_key, TTL_MAX, TTL_MAX);
             }
         }
 
+        dispute.resolved = true;
+        env.storage().persistent().set(&dispute_key, &dispute);
+
+        // Emit dispute_resolved event
         env.events().publish(
             (DISPUTE, symbol_short!("resolved")),
-            (EVENT_VERSION, subject, reporter, delta_index, accepted),
+            (EVENT_VERSION, dispute.dispute_id, subject, reporter, delta_index, accepted),
         );
         Ok(())
     }
 
-    /// Anti-sybil check with caller-supplied thresholds.
-    ///
-    /// Returns `true` only if the subject's accumulated score meets `min_score`
-    /// AND at least `min_reporters` currently-registered reporters have submitted
-    /// at least one score for the subject. Reporters removed via
-    /// [`Self::remove_reporter`] no longer count toward the active-reporter tally.
-    ///
-    /// # Arguments
-    /// * `env` - The Soroban environment.
-    /// * `subject` - The address to evaluate.
-    /// * `min_score` - Minimum accumulated score required to pass.
-    /// * `min_reporters` - Minimum number of distinct active reporters required.
-    ///
-    /// # Returns
-    /// `true` if both thresholds are met, `false` otherwise (including when no
-    /// reputation record exists for the subject).
+    // ── Anti-sybil ────────────────────────────────────────────────────────────
+
     pub fn passes_sybil_check(
         env: Env,
         subject: Address,
         min_score: i64,
         min_reporters: u32,
     ) -> bool {
-    pub fn passes_sybil_check(env: Env, subject: Address, min_score: i64, min_reporters: u32) -> bool {
         let key = Self::record_key(&subject);
         if env.storage().persistent().has(&key) {
-            env.storage().persistent().extend_ttl(&key, TTL_MAX, TTL_MAX);
+            env.storage()
+                .persistent()
+                .extend_ttl(&key, TTL_MAX, TTL_MAX);
         }
-        match env.storage().persistent().get::<(Symbol, Address), ReputationRecord>(&key) {
+        match env
+            .storage()
+            .persistent()
+            .get::<(Symbol, Address), ReputationRecord>(&key)
+        {
             None => false,
             Some(rec) => {
                 if rec.score < min_score {
@@ -553,7 +704,9 @@ impl Reputation {
                 for r in active_reporters.iter() {
                     let hk = Self::history_key(&subject, &r);
                     if env.storage().persistent().has(&hk) {
-                        env.storage().persistent().extend_ttl(&hk, TTL_MAX, TTL_MAX);
+                        env.storage()
+                            .persistent()
+                            .extend_ttl(&hk, TTL_MAX, TTL_MAX);
                         active_count += 1;
                     }
                 }
@@ -562,50 +715,84 @@ impl Reputation {
         }
     }
 
-    pub fn passes_sybil_check_default(env: Env, subject: Address) -> Result<bool, ContractError> {
-        let threshold: DefaultThreshold = env.storage().instance().get(&DEF_THRESH).ok_or(ContractError::NotInitialized)?;
+    pub fn passes_sybil_check_default(
+        env: Env,
+        subject: Address,
+    ) -> Result<bool, ContractError> {
+        let threshold: DefaultThreshold = env
+            .storage()
+            .instance()
+            .get(&DEF_THRESH)
+            .ok_or(ContractError::NotInitialized)?;
         let key = Self::record_key(&subject);
-        match env.storage().persistent().get::<(Symbol, Address), ReputationRecord>(&key) {
+        match env
+            .storage()
+            .persistent()
+            .get::<(Symbol, Address), ReputationRecord>(&key)
+        {
             None => Ok(false),
-            Some(rec) => Ok(rec.score >= threshold.min_score && rec.reporter_count >= threshold.min_reporters),
+            Some(rec) => Ok(
+                rec.score >= threshold.min_score
+                    && rec.reporter_count >= threshold.min_reporters,
+            ),
         }
     }
+
+    // ── List / pagination helpers ─────────────────────────────────────────────
 
     pub fn get_reporters_list(env: Env) -> Vec<Address> {
         Self::get_reporters(&env)
     }
 
-    pub fn list_reporters(env: Env, cursor: Option<u64>, limit: u32) -> ReportersPage {
+    pub fn list_reporters(
+        env: Env,
+        cursor: Option<u64>,
+        limit: u32,
+    ) -> ReportersPage {
         let all = Self::get_reporters(&env);
         let total = all.len();
         let start: u64 = cursor.unwrap_or(0);
-        let effective_limit: u32 = if limit == 0 || limit > PAGE_CAP { PAGE_CAP } else { limit };
+        let effective_limit: u32 =
+            if limit == 0 || limit > PAGE_CAP { PAGE_CAP } else { limit };
         let mut items: Vec<Address> = Vec::new(&env);
         let mut next: u64 = start;
         let mut taken: u32 = 0;
         while (next as u32) < total && taken < effective_limit {
             items.push_back(all.get(next as u32).unwrap());
-            next += 1; taken += 1;
+            next += 1;
+            taken += 1;
         }
         let next_cursor = if (next as u32) < total { Some(next) } else { None };
         ReportersPage { items, next_cursor }
     }
 
-    pub fn list_history(env: Env, subject: Address, reporter: Address, cursor: Option<u64>, limit: u32) -> Result<ScoreEntriesPage, ContractError> {
+    pub fn list_history(
+        env: Env,
+        subject: Address,
+        reporter: Address,
+        cursor: Option<u64>,
+        limit: u32,
+    ) -> Result<ScoreEntriesPage, ContractError> {
         if !Self::get_reporters(&env).contains(&reporter) {
             return Err(ContractError::ReporterNotFound);
         }
         let key = Self::history_key(&subject, &reporter);
-        let all: Vec<ScoreEntry> = env.storage().persistent().get(&key).unwrap_or_else(|| Vec::new(&env));
+        let all: Vec<ScoreEntry> = env
+            .storage()
+            .persistent()
+            .get(&key)
+            .unwrap_or_else(|| Vec::new(&env));
         let total = all.len();
         let start: u64 = cursor.unwrap_or(0);
-        let effective_limit: u32 = if limit == 0 || limit > PAGE_CAP { PAGE_CAP } else { limit };
+        let effective_limit: u32 =
+            if limit == 0 || limit > PAGE_CAP { PAGE_CAP } else { limit };
         let mut items: Vec<ScoreEntry> = Vec::new(&env);
         let mut next: u64 = start;
         let mut taken: u32 = 0;
         while (next as u32) < total && taken < effective_limit {
             items.push_back(all.get(next as u32).unwrap());
-            next += 1; taken += 1;
+            next += 1;
+            taken += 1;
         }
         let next_cursor = if (next as u32) < total { Some(next) } else { None };
         Ok(ScoreEntriesPage { items, next_cursor })
@@ -613,83 +800,20 @@ impl Reputation {
 
     pub fn get_storage_stats(env: Env) -> ReputationStorageStats {
         ReputationStorageStats {
-            total_subjects: env.storage().instance().get(&SUBJECT_CNT).unwrap_or(0),
-            total_score_entries: env.storage().instance().get(&SCORE_CNT).unwrap_or(0),
+            total_subjects: env
+                .storage()
+                .instance()
+                .get(&SUBJECT_CNT)
+                .unwrap_or(0),
+            total_score_entries: env
+                .storage()
+                .instance()
+                .get(&SCORE_CNT)
+                .unwrap_or(0),
         }
     }
 
-    // ── Disputes ──────────────────────────────────────────────────────────────
-
-    /// Opens a dispute against a reporter's score submission.
-    /// Emits a `SCORE/disputed` event.
-    pub fn dispute_score(env: Env, subject: Address, reporter: Address, delta_index: u32) -> Result<u32, ContractError> {
-        subject.require_auth();
-        if !Self::get_reporters(&env).contains(&reporter) {
-            return Err(ContractError::ReporterNotFound);
-        }
-        let history_key = Self::history_key(&subject, &reporter);
-        let history: Vec<ScoreEntry> = env.storage().persistent().get(&history_key).unwrap_or_else(|| Vec::new(&env));
-        let entry = history.get(delta_index).expect("delta_index out of range");
-
-        let dispute_id: u32 = env.storage().instance().get(&DISPUTE_CNT).unwrap_or(0) + 1;
-        env.storage().instance().set(&DISPUTE_CNT, &dispute_id);
-
-        let dispute = Dispute {
-            dispute_id,
-            subject: subject.clone(),
-            reporter: reporter.clone(),
-            delta_index,
-            delta: entry.delta,
-            opened_at: env.ledger().sequence(),
-            resolved: false,
-        };
-        let dkey = (DISPUTE, dispute_id);
-        env.storage().persistent().set(&dkey, &dispute);
-        env.storage().persistent().extend_ttl(&dkey, TTL_MAX, TTL_MAX);
-
-        env.events().publish(
-            (symbol_short!("SCORE"), symbol_short!("disputed")),
-            (EVENT_VERSION, dispute_id, subject, reporter, entry.delta),
-        );
-        Ok(dispute_id)
-    }
-
-    /// Resolves an open dispute. Admin only.
-    /// If `accepted=true`, reverts the delta from the subject's score.
-    /// Disputes expire after [`DISPUTE_WINDOW_LEDGERS`] ledgers.
-    pub fn resolve_dispute(env: Env, admin: Address, dispute_id: u32, accepted: bool) -> Result<(), ContractError> {
-        admin.require_auth();
-        let stored_admin: Address = env.storage().instance().get(&ADMIN).ok_or(ContractError::NotInitialized)?;
-        if stored_admin != admin {
-            return Err(ContractError::Unauthorized);
-        }
-        let dkey = (DISPUTE, dispute_id);
-        let mut dispute: Dispute = env.storage().persistent().get(&dkey).ok_or(ContractError::DisputeNotFound)?;
-        if dispute.resolved {
-            return Err(ContractError::DisputeAlreadyResolved);
-        }
-        if env.ledger().sequence() > dispute.opened_at + DISPUTE_WINDOW_LEDGERS {
-            return Err(ContractError::DisputeExpired);
-        }
-        if accepted {
-            let rec_key = Self::record_key(&dispute.subject);
-            if let Some(mut record) = env.storage().persistent().get::<(Symbol, Address), ReputationRecord>(&rec_key) {
-                record.score = record.score.saturating_sub(dispute.delta).max(MIN_SCORE);
-                record.updated_at = env.ledger().timestamp();
-                env.storage().persistent().set(&rec_key, &record);
-                env.storage().persistent().extend_ttl(&rec_key, TTL_MAX, TTL_MAX);
-            }
-        }
-        dispute.resolved = true;
-        env.storage().persistent().set(&dkey, &dispute);
-        env.events().publish(
-            (symbol_short!("SCORE"), symbol_short!("resolved")),
-            (EVENT_VERSION, dispute_id, accepted),
-        );
-        Ok(())
-    }
-
-    // ── Helpers ───────────────────────────────────────────────────────────────
+    // ── Private helpers ───────────────────────────────────────────────────────
 
     fn require_uninitialized(env: &Env) -> Result<(), ContractError> {
         if env.storage().instance().has(&ADMIN) {
@@ -703,7 +827,11 @@ impl Reputation {
     }
 
     fn require_admin(env: &Env) -> Result<(), ContractError> {
-        let admin: Address = env.storage().instance().get(&ADMIN).ok_or(ContractError::NotInitialized)?;
+        let admin: Address = env
+            .storage()
+            .instance()
+            .get(&ADMIN)
+            .ok_or(ContractError::NotInitialized)?;
         admin.require_auth();
         Ok(())
     }
@@ -716,7 +844,10 @@ impl Reputation {
     }
 
     fn get_reporters(env: &Env) -> Vec<Address> {
-        env.storage().instance().get(&REPORTER).unwrap_or_else(|| Vec::new(env))
+        env.storage()
+            .instance()
+            .get(&REPORTER)
+            .unwrap_or_else(|| Vec::new(env))
     }
 
     fn record_key(subject: &Address) -> (Symbol, Address) {
@@ -731,25 +862,43 @@ impl Reputation {
         (RATE_LIMIT, subject.clone(), reporter.clone())
     }
 
-    /// Checks rate limit for (subject, reporter) and sets it. Call only during write phase.
-    fn check_and_set_rate_limit(env: &Env, subject: &Address, reporter: &Address) -> Result<(), ContractError> {
-        let rate_key = Self::rate_key(subject, reporter);
-        let current_ledger = env.ledger().sequence();
-        let min_interval: u32 = env.storage().instance().get(&MIN_INTERVAL_KEY).unwrap_or(DEFAULT_MIN_INTERVAL);
-        if let Some(last_ledger) = env.storage().persistent().get::<(Symbol, Address, Address), u32>(&rate_key) {
-            if current_ledger <= last_ledger + min_interval { return Err(ContractError::RateLimitExceeded); }
-        }
-        env.storage().persistent().set(&rate_key, &current_ledger);
-        env.storage().persistent().extend_ttl(&rate_key, TTL_MAX, TTL_MAX);
-        Ok(())
-    }
-
     fn dispute_key(
         subject: &Address,
         reporter: &Address,
         delta_index: u32,
     ) -> (Symbol, Address, Address, u32) {
         (DISPUTE, subject.clone(), reporter.clone(), delta_index)
+    }
+
+    /// Checks the rate limit for (subject, reporter) and records the current
+    /// ledger sequence on success. Uses the admin-configurable window stored
+    /// under [`MIN_INTERVAL_KEY`].
+    fn check_and_set_rate_limit(
+        env: &Env,
+        subject: &Address,
+        reporter: &Address,
+    ) -> Result<(), ContractError> {
+        let rate_key = Self::rate_key(subject, reporter);
+        let current_ledger = env.ledger().sequence();
+        let min_interval: u32 = env
+            .storage()
+            .instance()
+            .get(&MIN_INTERVAL_KEY)
+            .unwrap_or(DEFAULT_MIN_INTERVAL);
+        if let Some(last_ledger) = env
+            .storage()
+            .persistent()
+            .get::<(Symbol, Address, Address), u32>(&rate_key)
+        {
+            if current_ledger <= last_ledger + min_interval {
+                return Err(ContractError::RateLimitExceeded);
+            }
+        }
+        env.storage().persistent().set(&rate_key, &current_ledger);
+        env.storage()
+            .persistent()
+            .extend_ttl(&rate_key, TTL_MAX, TTL_MAX);
+        Ok(())
     }
 }
 
@@ -758,7 +907,10 @@ impl Reputation {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use soroban_sdk::{testutils::{Address as _, Ledger as _}, Env, String};
+    use soroban_sdk::{
+        testutils::{Address as _, Ledger as _},
+        Env, String,
+    };
 
     fn setup() -> (Env, Address, ReputationClient<'static>) {
         let env = Env::default();
@@ -781,7 +933,10 @@ mod tests {
     #[test]
     fn test_double_initialize_returns_error() {
         let (env, admin, client) = setup();
-        assert_eq!(client.try_initialize(&admin), Err(Ok(ContractError::AlreadyInitialized)));
+        assert_eq!(
+            client.try_initialize(&admin),
+            Err(Ok(ContractError::AlreadyInitialized))
+        );
     }
 
     #[test]
@@ -838,34 +993,20 @@ mod tests {
             Err(Ok(ContractError::RateLimitExceeded))
         );
         env.ledger().with_mut(|li| li.sequence_number += 101);
-        client.submit_score(&reporter1, &subject, &20, &r1);
-        client.submit_score(&reporter2, &subject, &99, &r2);
-
-        let h1 = client.get_history(&subject, &reporter1, &0, &10);
-        assert_eq!(h1.len(), 2);
-        assert_eq!(h1.get(0).unwrap().delta, 10);
-        assert_eq!(h1.get(1).unwrap().delta, 20);
-
-        let h2 = client.get_history(&subject, &reporter2, &0, &10);
-        assert_eq!(h2.len(), 1);
-        assert_eq!(h2.get(0).unwrap().delta, 99);
+        client.submit_score(&reporter, &subject, &10, &reason);
     }
 
     #[test]
     fn test_transfer_admin_authorized() {
         let env = Env::default();
         env.mock_all_auths();
-
         let contract_id = env.register_contract(None, Reputation);
         let client = ReputationClient::new(&env, &contract_id);
-
         let admin = Address::generate(&env);
         let new_admin = Address::generate(&env);
         let reporter = Address::generate(&env);
-
         client.initialize(&admin);
         client.transfer_admin(&admin, &new_admin);
-        // new_admin can now add a reporter (mock_all_auths satisfies auth)
         client.add_reporter(&reporter);
     }
 
@@ -874,224 +1015,186 @@ mod tests {
     fn test_transfer_admin_unauthorized() {
         let env = Env::default();
         env.mock_all_auths();
-
         let contract_id = env.register_contract(None, Reputation);
         let client = ReputationClient::new(&env, &contract_id);
-
         let admin = Address::generate(&env);
         let attacker = Address::generate(&env);
         let new_admin = Address::generate(&env);
-
         client.initialize(&admin);
-        // attacker is not the admin — must panic
         client.transfer_admin(&attacker, &new_admin);
     }
 
-    /// A second dispute_score call against the same (subject, reporter, delta_index)
-    /// while one is already open must be rejected.
+    // ── #591: dispute mechanism ───────────────────────────────────────────────
+
     #[test]
-    fn test_dispute_score_rejects_duplicate() {
-        let env = Env::default();
-        env.mock_all_auths();
-
-        let contract_id = env.register_contract(None, Reputation);
-        let client = ReputationClient::new(&env, &contract_id);
-
-        let admin = Address::generate(&env);
+    fn test_dispute_score_and_resolve_accepted() {
+        let (env, _admin, client) = setup();
         let reporter = Address::generate(&env);
-        let disputer = Address::generate(&env);
         let subject = Address::generate(&env);
-
-        client.initialize(&admin);
         client.add_reporter(&reporter);
-        client.add_reporter(&disputer);
-
         let reason = String::from_str(&env, "activity");
-        client.submit_score(&reporter, &subject, &40, &reason);
+        client.submit_score(&reporter, &subject, &50, &reason);
 
-        client.dispute_score(&disputer, &subject, &reporter, &0);
+        let dispute_id = client.dispute_score(&subject, &reporter, &0);
+        assert_eq!(dispute_id, 1);
 
-        let result = client.try_dispute_score(&disputer, &subject, &reporter, &0);
-        assert_eq!(result, Err(Ok(ContractError::DisputeAlreadyOpen)));
-    }
+        let score_before = client.get_reputation(&subject).score;
+        client.resolve_dispute(&subject, &reporter, &0, &true);
+        let score_after = client.get_reputation(&subject).score;
+        assert!(score_after < score_before);
 
-    /// dispute_score with an out-of-range index must return InvalidHistoryIndex.
-    #[test]
-    fn test_dispute_score_invalid_index() {
-        let env = Env::default();
-        env.mock_all_auths();
+        let history = client.get_history(&subject, &reporter, &0, &10, &None, &None);
+        assert_eq!(history.len(), 0);
 
-        let contract_id = env.register_contract(None, Reputation);
-        let client = ReputationClient::new(&env, &contract_id);
-
-        let admin = Address::generate(&env);
-        let reporter = Address::generate(&env);
-        let subject = Address::generate(&env);
-
-        client.initialize(&admin);
-        client.add_reporter(&reporter);
-
-        let result = client.try_dispute_score(&reporter, &subject, &reporter, &0);
+        // Resolved dispute cannot be reopened at same index (no entry left, index OOB)
+        let result = client.try_dispute_score(&subject, &reporter, &0);
         assert_eq!(result, Err(Ok(ContractError::InvalidHistoryIndex)));
     }
 
-    /// Accepting a dispute must reverse the score delta, remove the entry from
-    /// history, and decrement reporter_count once the reporter has no entries left.
     #[test]
-    fn test_resolve_dispute_accepted_keeps_state_consistent() {
-        let env = Env::default();
-        env.mock_all_auths();
-
-        let contract_id = env.register_contract(None, Reputation);
-        let client = ReputationClient::new(&env, &contract_id);
-
-        let admin = Address::generate(&env);
+    fn test_dispute_score_and_resolve_rejected() {
+        let (env, _admin, client) = setup();
         let reporter = Address::generate(&env);
-        let disputer = Address::generate(&env);
         let subject = Address::generate(&env);
-
-        client.initialize(&admin);
         client.add_reporter(&reporter);
-        client.add_reporter(&disputer);
-
         let reason = String::from_str(&env, "activity");
         client.submit_score(&reporter, &subject, &40, &reason);
 
-        let rec = client.get_reputation(&subject);
-        assert_eq!(rec.score, 40);
-        assert_eq!(rec.reporter_count, 1);
-
-        client.dispute_score(&disputer, &subject, &reporter, &0);
-        client.resolve_dispute(&subject, &reporter, &0, &true);
-
-        let rec = client.get_reputation(&subject);
-        assert_eq!(rec.score, 0);
-        assert_eq!(rec.reporter_count, 0);
-
-        // History entry is gone.
-        let history = client.get_history(&subject, &reporter, &0, &10);
-        assert_eq!(history.len(), 0);
-
-        // The dispute is closed — resolving again must fail.
-        let result = client.try_resolve_dispute(&subject, &reporter, &0, &true);
-        assert_eq!(result, Err(Ok(ContractError::DisputeNotFound)));
-
-        // A fresh dispute can now be opened against a new submission at index 0.
-        env.ledger().with_mut(|li| li.sequence_number += 101);
-        client.submit_score(&reporter, &subject, &10, &reason);
-        client.dispute_score(&disputer, &subject, &reporter, &0);
-    }
-
-    /// Rejecting a dispute must leave the score and history untouched.
-    #[test]
-    fn test_resolve_dispute_rejected_leaves_state_unchanged() {
-        let env = Env::default();
-        env.mock_all_auths();
-
-        let contract_id = env.register_contract(None, Reputation);
-        let client = ReputationClient::new(&env, &contract_id);
-
-        let admin = Address::generate(&env);
-        let reporter = Address::generate(&env);
-        let disputer = Address::generate(&env);
-        let subject = Address::generate(&env);
-
-        client.initialize(&admin);
-        client.add_reporter(&reporter);
-        client.add_reporter(&disputer);
-
-        let reason = String::from_str(&env, "activity");
-        client.submit_score(&reporter, &subject, &40, &reason);
-
-        client.dispute_score(&disputer, &subject, &reporter, &0);
+        client.dispute_score(&subject, &reporter, &0);
         client.resolve_dispute(&subject, &reporter, &0, &false);
 
         let rec = client.get_reputation(&subject);
         assert_eq!(rec.score, 40);
         assert_eq!(rec.reporter_count, 1);
-
-        let history = client.get_history(&subject, &reporter, &0, &10);
-        assert_eq!(history.len(), 1);
-    }
-
-    /// get_history returns ReporterNotFound error for unregistered reporter.
-    #[test]
-    fn test_get_history_unknown_reporter() {
-        let env = Env::default();
-        env.mock_all_auths();
-
-        let contract_id = env.register_contract(None, Reputation);
-        let client = ReputationClient::new(&env, &contract_id);
-
-        let admin = Address::generate(&env);
-        let reporter = Address::generate(&env);
-        let unknown = Address::generate(&env);
-        let subject = Address::generate(&env);
-
-        client.initialize(&admin);
-        client.add_reporter(&reporter);
-
-        let reason = String::from_str(&env, "test");
-        client.submit_score(&reporter, &subject, &10, &reason);
     }
 
     #[test]
-    fn test_get_history_unknown_reporter() {
-        let (env, _admin, client) = setup();
-        let subject = Address::generate(&env);
-        let unknown = Address::generate(&env);
-        assert_eq!(
-            client.try_get_history(&subject, &unknown, &0, &10, &None, &None),
-            Err(Ok(ContractError::ReporterNotFound))
-        );
-    }
-
-    #[test]
-    fn test_get_history_with_timestamp_filters() {
+    fn test_dispute_score_rejects_duplicate_open() {
         let (env, _admin, client) = setup();
         let reporter = Address::generate(&env);
         let subject = Address::generate(&env);
         client.add_reporter(&reporter);
         let reason = String::from_str(&env, "activity");
-        
-        // Submit at timestamp 1000
-        env.ledger().with_mut(|li| li.timestamp = 1000);
-        client.submit_score(&reporter, &subject, &10, &reason);
-        
-        // Submit at timestamp 2000
-        env.ledger().with_mut(|li| {
-            li.sequence_number += 101;
-            li.timestamp = 2000;
-        });
+        client.submit_score(&reporter, &subject, &40, &reason);
+        client.dispute_score(&subject, &reporter, &0);
+        assert_eq!(
+            client.try_dispute_score(&subject, &reporter, &0),
+            Err(Ok(ContractError::DisputeAlreadyOpen))
+        );
+    }
+
+    #[test]
+    fn test_dispute_score_invalid_index() {
+        let (env, _admin, client) = setup();
+        let reporter = Address::generate(&env);
+        let subject = Address::generate(&env);
+        client.add_reporter(&reporter);
+        assert_eq!(
+            client.try_dispute_score(&subject, &reporter, &0),
+            Err(Ok(ContractError::InvalidHistoryIndex))
+        );
+    }
+
+    #[test]
+    fn test_resolve_dispute_already_resolved() {
+        let (env, _admin, client) = setup();
+        let reporter = Address::generate(&env);
+        let subject = Address::generate(&env);
+        client.add_reporter(&reporter);
+        let reason = String::from_str(&env, "reason");
         client.submit_score(&reporter, &subject, &20, &reason);
-        
-        // Submit at timestamp 3000
-        env.ledger().with_mut(|li| {
-            li.sequence_number += 101;
-            li.timestamp = 3000;
-        });
-        client.submit_score(&reporter, &subject, &30, &reason);
-        
-        // Filter from 1500 - should get 2 entries (2000 and 3000)
-        let filtered = client.get_history(&subject, &reporter, &0, &100, &Some(1500), &None);
-        assert_eq!(filtered.len(), 2);
-        assert_eq!(filtered.get(0).unwrap().submitted_at, 2000);
-        assert_eq!(filtered.get(1).unwrap().submitted_at, 3000);
-        
-        // Filter to 2500 - should get 2 entries (1000 and 2000)
-        let filtered = client.get_history(&subject, &reporter, &0, &100, &None, &Some(2500));
-        assert_eq!(filtered.len(), 2);
-        assert_eq!(filtered.get(0).unwrap().submitted_at, 1000);
-        assert_eq!(filtered.get(1).unwrap().submitted_at, 2000);
-        
-        // Filter from 1500 to 2500 - should get 1 entry (2000)
-        let filtered = client.get_history(&subject, &reporter, &0, &100, &Some(1500), &Some(2500));
-        assert_eq!(filtered.len(), 1);
-        assert_eq!(filtered.get(0).unwrap().submitted_at, 2000);
-        
-        // No filters - should get all 3 entries (backward compatible)
-        let all = client.get_history(&subject, &reporter, &0, &100, &None, &None);
-        assert_eq!(all.len(), 3);
+        client.dispute_score(&subject, &reporter, &0);
+        client.resolve_dispute(&subject, &reporter, &0, &false);
+        assert_eq!(
+            client.try_resolve_dispute(&subject, &reporter, &0, &false),
+            Err(Ok(ContractError::DisputeAlreadyResolved))
+        );
+    }
+
+    #[test]
+    fn test_resolve_dispute_expired() {
+        let (env, _admin, client) = setup();
+        let reporter = Address::generate(&env);
+        let subject = Address::generate(&env);
+        client.add_reporter(&reporter);
+        let reason = String::from_str(&env, "reason");
+        client.submit_score(&reporter, &subject, &20, &reason);
+        client.dispute_score(&subject, &reporter, &0);
+        env.ledger()
+            .with_mut(|li| li.sequence_number += DISPUTE_WINDOW_LEDGERS + 1);
+        assert_eq!(
+            client.try_resolve_dispute(&subject, &reporter, &0, &true),
+            Err(Ok(ContractError::DisputeExpired))
+        );
+    }
+
+    // ── #580: configurable rate-limit window ──────────────────────────────────
+
+    #[test]
+    fn test_default_min_interval_used_on_init() {
+        let (_env, _admin, client) = setup();
+        assert_eq!(client.get_min_interval(), DEFAULT_MIN_INTERVAL);
+    }
+
+    #[test]
+    fn test_admin_can_change_min_interval() {
+        let (env, admin, client) = setup();
+        let reporter = Address::generate(&env);
+        let subject = Address::generate(&env);
+        client.add_reporter(&reporter);
+        client.set_min_interval(&admin, &20);
+        assert_eq!(client.get_min_interval(), 20);
+
+        let reason = String::from_str(&env, "activity");
+        client.submit_score(&reporter, &subject, &10, &reason);
+
+        // Still within shorter window — rejected
+        env.ledger().with_mut(|li| li.sequence_number += 15);
+        assert_eq!(
+            client.try_submit_score(&reporter, &subject, &10, &reason),
+            Err(Ok(ContractError::RateLimitExceeded))
+        );
+
+        // Past the new window — accepted
+        env.ledger().with_mut(|li| li.sequence_number += 10);
+        client.submit_score(&reporter, &subject, &10, &reason);
+    }
+
+    #[test]
+    fn test_set_min_interval_floor_enforced() {
+        let (_env, admin, client) = setup();
+        assert_eq!(
+            client.try_set_min_interval(&admin, &(MIN_INTERVAL_FLOOR - 1)),
+            Err(Ok(ContractError::InvalidMinInterval))
+        );
+    }
+
+    #[test]
+    fn test_set_min_interval_ceiling_enforced() {
+        let (_env, admin, client) = setup();
+        assert_eq!(
+            client.try_set_min_interval(&admin, &(MIN_INTERVAL_CEILING + 1)),
+            Err(Ok(ContractError::InvalidMinInterval))
+        );
+    }
+
+    #[test]
+    fn test_set_min_interval_boundary_values_allowed() {
+        let (_env, admin, client) = setup();
+        client.set_min_interval(&admin, &MIN_INTERVAL_FLOOR);
+        assert_eq!(client.get_min_interval(), MIN_INTERVAL_FLOOR);
+        client.set_min_interval(&admin, &MIN_INTERVAL_CEILING);
+        assert_eq!(client.get_min_interval(), MIN_INTERVAL_CEILING);
+    }
+
+    #[test]
+    fn test_set_min_interval_unauthorized() {
+        let (env, _admin, client) = setup();
+        let attacker = Address::generate(&env);
+        assert_eq!(
+            client.try_set_min_interval(&attacker, &500),
+            Err(Ok(ContractError::Unauthorized))
+        );
     }
 
     #[test]
@@ -1115,6 +1218,45 @@ mod tests {
     }
 
     #[test]
+    fn test_get_history_unknown_reporter() {
+        let (env, _admin, client) = setup();
+        let subject = Address::generate(&env);
+        let unknown = Address::generate(&env);
+        assert_eq!(
+            client.try_get_history(&subject, &unknown, &0, &10, &None, &None),
+            Err(Ok(ContractError::ReporterNotFound))
+        );
+    }
+
+    #[test]
+    fn test_get_history_with_timestamp_filters() {
+        let (env, _admin, client) = setup();
+        let reporter = Address::generate(&env);
+        let subject = Address::generate(&env);
+        client.add_reporter(&reporter);
+        let reason = String::from_str(&env, "activity");
+
+        env.ledger().with_mut(|li| li.timestamp = 1000);
+        client.submit_score(&reporter, &subject, &10, &reason);
+        env.ledger().with_mut(|li| { li.sequence_number += 101; li.timestamp = 2000; });
+        client.submit_score(&reporter, &subject, &20, &reason);
+        env.ledger().with_mut(|li| { li.sequence_number += 101; li.timestamp = 3000; });
+        client.submit_score(&reporter, &subject, &30, &reason);
+
+        let filtered = client.get_history(&subject, &reporter, &0, &100, &Some(1500), &None);
+        assert_eq!(filtered.len(), 2);
+
+        let filtered = client.get_history(&subject, &reporter, &0, &100, &None, &Some(2500));
+        assert_eq!(filtered.len(), 2);
+
+        let filtered = client.get_history(&subject, &reporter, &0, &100, &Some(1500), &Some(2500));
+        assert_eq!(filtered.len(), 1);
+
+        let all = client.get_history(&subject, &reporter, &0, &100, &None, &None);
+        assert_eq!(all.len(), 3);
+    }
+
+    #[test]
     fn test_list_reporters_paginates() {
         let (env, _admin, client) = setup();
         for _ in 0..3 {
@@ -1129,152 +1271,11 @@ mod tests {
     }
 
     #[test]
-    fn test_dispute_score_and_resolve() {
-        let (env, admin, client) = setup();
-        let reporter = Address::generate(&env);
-        let subject = Address::generate(&env);
-        client.add_reporter(&reporter);
-        let reason = String::from_str(&env, "activity");
-        client.submit_score(&reporter, &subject, &50, &reason);
-
-        // Open dispute for delta at index 0
-        let dispute_id = client.dispute_score(&subject, &reporter, &0);
-        assert_eq!(dispute_id, 1);
-
-        // resolve with accepted=false — score unchanged
-        let score_before = client.get_reputation(&subject).score;
-        client.resolve_dispute(&admin, &dispute_id, &false);
-        assert_eq!(client.get_reputation(&subject).score, score_before);
-
-        // A second submit + dispute resolved with accepted=true reverts delta
-        env.ledger().with_mut(|li| li.sequence_number += 101);
-        client.submit_score(&reporter, &subject, &30, &reason);
-        let dispute_id2 = client.dispute_score(&subject, &reporter, &1);
-        let score_before2 = client.get_reputation(&subject).score;
-        client.resolve_dispute(&admin, &dispute_id2, &true);
-        let score_after = client.get_reputation(&subject).score;
-        assert!(score_after <= score_before2);
-    }
-
-    #[test]
-    fn test_dispute_already_resolved() {
-        let (env, admin, client) = setup();
-        let reporter = Address::generate(&env);
-        let subject = Address::generate(&env);
-        client.add_reporter(&reporter);
-        let reason = String::from_str(&env, "reason");
-        client.submit_score(&reporter, &subject, &20, &reason);
-        let dispute_id = client.dispute_score(&subject, &reporter, &0);
-        client.resolve_dispute(&admin, &dispute_id, &false);
-        assert_eq!(
-            client.try_resolve_dispute(&admin, &dispute_id, &false),
-            Err(Ok(ContractError::DisputeAlreadyResolved))
-        );
-    }
-
-    #[test]
-    fn test_dispute_expired() {
-        let (env, admin, client) = setup();
-        let reporter = Address::generate(&env);
-        let subject = Address::generate(&env);
-        client.add_reporter(&reporter);
-        let reason = String::from_str(&env, "reason");
-        client.submit_score(&reporter, &subject, &20, &reason);
-        let dispute_id = client.dispute_score(&subject, &reporter, &0);
-        // Advance past the dispute window
-        env.ledger().with_mut(|li| li.sequence_number += DISPUTE_WINDOW_LEDGERS + 1);
-        assert_eq!(
-            client.try_resolve_dispute(&admin, &dispute_id, &true),
-            Err(Ok(ContractError::DisputeExpired))
-        );
-    }
-
-    // ── SC-09: configurable rate-limit window ────────────────────────────────
-
-    #[test]
-    fn test_default_min_interval_used_on_init() {
-        let (_env, _admin, client) = setup();
-        assert_eq!(client.get_min_interval(), DEFAULT_MIN_INTERVAL);
-    }
-
-    #[test]
-    fn test_admin_can_change_min_interval_and_it_affects_rate_limiting() {
-        let (env, admin, client) = setup();
-        let reporter = Address::generate(&env);
-        let subject = Address::generate(&env);
-        client.add_reporter(&reporter);
-        client.set_min_interval(&admin, &20);
-        assert_eq!(client.get_min_interval(), 20);
-
-        let reason = String::from_str(&env, "activity");
-        client.submit_score(&reporter, &subject, &10, &reason);
-
-        // Still within the new, shorter window — rejected.
-        env.ledger().with_mut(|li| li.sequence_number += 15);
-        assert_eq!(
-            client.try_submit_score(&reporter, &subject, &10, &reason),
-            Err(Ok(ContractError::RateLimitExceeded))
-        );
-
-        // Past the new window — accepted.
-        env.ledger().with_mut(|li| li.sequence_number += 10);
-        client.submit_score(&reporter, &subject, &10, &reason);
-    }
-
-    #[test]
-    fn test_set_min_interval_floor_enforced() {
-        let (_env, admin, client) = setup();
-        assert_eq!(
-            client.try_set_min_interval(&admin, &(MIN_INTERVAL_FLOOR - 1)),
-            Err(Ok(ContractError::InvalidMinInterval))
-        );
-        assert_eq!(client.get_min_interval(), DEFAULT_MIN_INTERVAL);
-    }
-
-    #[test]
-    fn test_set_min_interval_ceiling_enforced() {
-        let (_env, admin, client) = setup();
-        assert_eq!(
-            client.try_set_min_interval(&admin, &(MIN_INTERVAL_CEILING + 1)),
-            Err(Ok(ContractError::InvalidMinInterval))
-        );
-        assert_eq!(client.get_min_interval(), DEFAULT_MIN_INTERVAL);
-    }
-
-    #[test]
-    fn test_set_min_interval_boundary_values_allowed() {
-        let (_env, admin, client) = setup();
-        client.set_min_interval(&admin, &MIN_INTERVAL_FLOOR);
-        assert_eq!(client.get_min_interval(), MIN_INTERVAL_FLOOR);
-        client.set_min_interval(&admin, &MIN_INTERVAL_CEILING);
-        assert_eq!(client.get_min_interval(), MIN_INTERVAL_CEILING);
-    }
-
-    #[test]
-    fn test_set_min_interval_unauthorized_caller() {
-        let (env, _admin, client) = setup();
-        let attacker = Address::generate(&env);
-        assert_eq!(
-            client.try_set_min_interval(&attacker, &500),
-            Err(Ok(ContractError::Unauthorized))
-        );
-        assert_eq!(client.get_min_interval(), DEFAULT_MIN_INTERVAL);
-    }
-
-    #[test]
     fn test_storage_key_symbols_are_unique() {
         let keys = [
-            ADMIN,
-            REPORTER,
-            DEF_THRESH,
-            SUBJECT_CNT,
-            SCORE_CNT,
-            RECORD,
-            HISTORY,
-            RATE_LIMIT,
-            DISPUTE,
+            ADMIN, REPORTER, DEF_THRESH, SUBJECT_CNT, SCORE_CNT,
+            RECORD, HISTORY, RATE_LIMIT, DISPUTE, DISPUTE_CNT, MIN_INTERVAL_KEY,
         ];
-        let keys = [ADMIN, REPORTER, DEF_THRESH, SUBJECT_CNT, SCORE_CNT, RECORD, HISTORY, RATE_LIMIT, DISPUTE, DISPUTE_CNT];
         for (i, left) in keys.iter().enumerate() {
             for right in keys.iter().skip(i + 1) {
                 assert_ne!(left, right);

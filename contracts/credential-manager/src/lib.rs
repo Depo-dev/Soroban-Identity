@@ -25,16 +25,13 @@ const ISSUER_CREDS: Symbol = symbol_short!("ISSCREDS");
 const ISS_NONCE: Symbol = symbol_short!("ISSNONCE");
 
 const MAX_ISSUERS: u32 = 100;
+const ABSOLUTE_MAX_ISSUERS: u32 = 500;
 const SCHEMA: Symbol = symbol_short!("SCHEMA");
 const IDENTITY_REGISTRY: Symbol = symbol_short!("IDREGIST");
-/// Issue #551: reentrancy guard flag. Set for the duration of any function
-/// that performs a cross-contract call (e.g. `issue_credential` calling
-/// into `identity-registry`), so a re-invocation of a guarded function
-/// during that call is rejected instead of observing half-updated state.
+/// Configurable max-issuers storage key.
+const MAX_ISSUERS_CFG: Symbol = symbol_short!("MAXISS");
+/// Issue #551: reentrancy guard flag.
 const EXECUTING: Symbol = symbol_short!("EXEC");
-
-const MAX_ISSUERS: u32 = 100;
-const ABSOLUTE_MAX_ISSUERS: u32 = 500;
 const MAX_ISSUER_CREDS: u32 = 10_000;
 const TTL_MAX: u32 = 6_312_000;
 const TTL_MIN: u32 = 17_280;
@@ -60,6 +57,9 @@ pub enum ContractError {
     /// invocation (which is mid cross-contract call) had not yet completed.
     ReentrantCall = 14,
     SubjectHasNoDid = 15,
+    InvalidMaxIssuers = 16,
+    BatchTooLarge = 17,
+    InvalidSchemaHash = 18,
 }
 
 // ── Data types ────────────────────────────────────────────────────────────────
@@ -338,11 +338,6 @@ impl CredentialManager {
                 if !existing.revoked {
                     return Err(ContractError::CredentialAlreadyExists);
                 }
-        let id = Self::derive_id(&env, &issuer, &subject, &credential_type);
-        let key = Self::cred_key(&id);
-        if let Some(existing) = env.storage().persistent().get::<_, Credential>(&key) {
-            if !existing.revoked {
-                return Err(ContractError::CredentialAlreadyExists);
             }
         }
 
@@ -425,7 +420,13 @@ impl CredentialManager {
         env.storage().persistent().set(&key, &cred);
         let revoked: u32 = env.storage().instance().get(&REVOKED_CNT).unwrap_or(0);
         env.storage().instance().set(&REVOKED_CNT, &(revoked + 1));
-        env.events().publish((CRED, symbol_short!("revoked")), (EVENT_VERSION, credential_id, issuer));
+        // closes #553: include revocation timestamp so off-chain systems can
+        // detect and invalidate cached verify_credential results.
+        let revoked_at: u64 = env.ledger().timestamp();
+        env.events().publish(
+            (CRED, symbol_short!("revoked")),
+            (EVENT_VERSION, credential_id, issuer, revoked_at),
+        );
         Ok(())
     }
 
@@ -643,9 +644,11 @@ impl CredentialManager {
         env.storage().persistent().set(&key, &cred);
         let revoked: u32 = env.storage().instance().get(&REVOKED_CNT).unwrap_or(0);
         env.storage().instance().set(&REVOKED_CNT, &(revoked + 1));
+        // closes #553: include revocation timestamp in batch events too.
+        let revoked_at: u64 = env.ledger().timestamp();
         env.events().publish(
             (CRED, symbol_short!("revoked")),
-            (EVENT_VERSION, credential_id.clone(), issuer.clone(), reason.clone()),
+            (EVENT_VERSION, credential_id.clone(), issuer.clone(), revoked_at, reason.clone()),
         );
         Ok(())
     }
@@ -674,34 +677,17 @@ impl CredentialManager {
         Ok(())
     }
 
-    /// Admin-only governance override for the issuer registry cap (Issue #532).
-    ///
-    /// `new_max` must not exceed [`ABSOLUTE_MAX_ISSUERS`]. Emits
-    /// `admin_config_changed` on success.
-    pub fn set_max_issuers(env: Env, admin: Address, new_max: u32) -> Result<(), ContractError> {
-        Self::require_admin(&env)?;
-        if new_max == 0 || new_max > ABSOLUTE_MAX_ISSUERS {
-            return Err(ContractError::MaxIssuersReached);
-        }
-        env.storage().instance().set(&MAX_ISSUERS_KEY, &new_max);
-        env.events().publish(
-            (symbol_short!("admin"), symbol_short!("cfgchg")),
-            (EVENT_VERSION, admin, new_max),
-        );
-        Ok(())
-    }
-
-    /// Current effective issuer cap: the admin-configured value if set via
-    /// [`Self::set_max_issuers`], otherwise the default [`MAX_ISSUERS`].
-    fn effective_max_issuers(env: &Env) -> u32 {
-        env.storage()
-            .instance()
-            .get(&MAX_ISSUERS_KEY)
-            .unwrap_or(MAX_ISSUERS)
-    }
-
     fn get_issuers_internal(env: &Env) -> Vec<Address> {
         env.storage().instance().get(&ISSUER).unwrap_or_else(|| Vec::new(env))
+    }
+
+    /// Current effective issuer cap.
+    fn effective_max_issuers(env: &Env) -> u32 {
+        env.storage().instance().get(&MAX_ISSUERS_CFG).unwrap_or(MAX_ISSUERS)
+    }
+
+    fn get_max_issuers_internal(env: &Env) -> u32 {
+        env.storage().instance().get(&MAX_ISSUERS_CFG).unwrap_or(MAX_ISSUERS)
     }
 
     /// Derives the deterministic credential ID as
@@ -716,7 +702,6 @@ impl CredentialManager {
         credential_type: &CredentialType,
         nonce: u64,
     ) -> BytesN<32> {
-    fn derive_id(env: &Env, issuer: &Address, subject: &Address, credential_type: &CredentialType) -> BytesN<32> {
         let type_tag: u8 = match credential_type {
             CredentialType::Kyc => 0,
             CredentialType::Reputation => 1,
@@ -1082,7 +1067,9 @@ mod tests {
 
     #[test]
     fn test_storage_key_symbols_are_unique() {
-        let keys = [ADMIN, ISSUER, CRED, SUBJECT, CRED_CNT, REVOKED_CNT, ISSUER_CREDS, SCHEMA];
+        let keys = [
+            ADMIN, ISSUER, CRED, SUBJECT, CRED_CNT, REVOKED_CNT, ISSUER_CREDS, SCHEMA, ISS_NONCE,
+        ];
         for (i, left) in keys.iter().enumerate() {
             for right in keys.iter().skip(i + 1) {
                 assert_ne!(left, right);
@@ -1093,18 +1080,24 @@ mod tests {
     #[test]
     fn test_error_variants() {
         let (env, admin, client) = setup();
-
-        assert_eq!(client.try_initialize(&admin), Err(Ok(CredentialError::AlreadyInitialized)));
-
-        let fake_id = BytesN::from_array(&env, &[1u8; 32]);
-        assert_eq!(client.try_get_credential(&fake_id), Err(Ok(CredentialError::NotFound)));
-
-        let rando = Address::generate(&env);
-        let claims: Map<String, String> = Map::new(&env);
-        let sig = Bytes::from_array(&env, &[0u8; 64]);
+        let dummy_registry = Address::generate(&env);
         assert_eq!(
-            client.try_issue_credential(&rando, &rando, &CredentialType::Kyc, &claims, &sig, &0u64),
-            Err(Ok(CredentialError::NotAnIssuer))
+            client.try_initialize(&admin, &dummy_registry),
+            Err(Ok(ContractError::AlreadyInitialized))
+        );
+        let fake_id = BytesN::from_array(&env, &[1u8; 32]);
+        assert_eq!(
+            client.try_get_credential(&fake_id),
+            Err(Ok(ContractError::CredentialNotFound))
+        );
+        let rando = Address::generate(&env);
+        assert_eq!(
+            client.try_issue_credential(
+                &rando, &rando, &CredentialType::Kyc,
+                &Map::new(&env), &BytesN::from_array(&env, &[1u8; 32]),
+                &Bytes::from_array(&env, &[0u8; 64]), &0u64, &None,
+            ),
+            Err(Ok(ContractError::UnauthorizedIssuer))
         );
     }
 
@@ -1116,7 +1109,6 @@ mod tests {
         let issuer = Address::generate(&env);
         client.add_issuer(&issuer);
 
-        // Issue MAX_ISSUER_CREDS credentials from different subjects
         let mut first_id = None;
         for i in 0..MAX_ISSUER_CREDS {
             let subject = Address::generate(&env);
@@ -1126,43 +1118,16 @@ mod tests {
             }
         }
 
-        // limit=0 → caller wants the default page size (PAGE_CAP=100). All 3
-        // credentials fit in one page.
-        let page = client.list_subject_credentials(&subject, &None, &0, &None);
-        assert_eq!(page.items.len(), 3);
-        assert_eq!(page.next_cursor, None);
-    }
-
-    /// Storage namespace symbols must be pairwise distinct.
-    #[test]
-    fn test_storage_key_symbols_are_unique() {
-        let keys = [
-            ADMIN,
-            ISSUER,
-            CRED,
-            SUBJECT,
-            CRED_CNT,
-            REVOKED_CNT,
-            ISSUER_CREDS,
-            ISS_NONCE,
-        ];
-        for (i, left) in keys.iter().enumerate() {
-            for right in keys.iter().skip(i + 1) {
-                assert_ne!(left, right);
-        // Index should be at MAX_ISSUER_CREDS
         let creds_before = client.get_issuer_credentials(&issuer);
         assert_eq!(creds_before.len(), MAX_ISSUER_CREDS as u32);
 
-        // Issue one more credential — should not panic and index stays at MAX_ISSUER_CREDS
         let new_subject = Address::generate(&env);
         let _new_id = issue_kyc(&env, &client, &issuer, &new_subject);
 
         let creds_after = client.get_issuer_credentials(&issuer);
         assert_eq!(creds_after.len(), MAX_ISSUER_CREDS as u32);
 
-        // The first credential ID should have been evicted (removed from head)
         if let Some(first) = first_id {
-            // Verify first_id is NOT in the list after eviction
             let mut found = false;
             for cred_id in creds_after.iter() {
                 if cred_id == first {
