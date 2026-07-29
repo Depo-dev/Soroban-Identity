@@ -325,7 +325,15 @@ impl Reputation {
         })
     }
 
-    pub fn get_history(env: Env, subject: Address, reporter: Address, offset: u32, limit: u32) -> Result<Vec<ScoreEntry>, ContractError> {
+    pub fn get_history(
+        env: Env,
+        subject: Address,
+        reporter: Address,
+        offset: u32,
+        limit: u32,
+        from_timestamp: Option<u64>,
+        to_timestamp: Option<u64>,
+    ) -> Result<Vec<ScoreEntry>, ContractError> {
         if !Self::get_reporters(&env).contains(&reporter) {
             return Err(ContractError::ReporterNotFound);
         }
@@ -334,12 +342,32 @@ impl Reputation {
             env.storage().persistent().extend_ttl(&key, TTL_MAX, TTL_MAX);
         }
         let all: Vec<ScoreEntry> = env.storage().persistent().get(&key).unwrap_or_else(|| Vec::new(&env));
+        
+        // Apply timestamp filters first
+        let mut filtered = Vec::new(&env);
+        for entry in all.iter() {
+            let matches_from = match from_timestamp {
+                Some(from) => entry.submitted_at >= from,
+                None => true,
+            };
+            let matches_to = match to_timestamp {
+                Some(to) => entry.submitted_at <= to,
+                None => true,
+            };
+            if matches_from && matches_to {
+                filtered.push_back(entry);
+            }
+        }
+        
+        // Apply offset and limit pagination
         let effective_limit = if limit == 0 || limit > 100 { 100 } else { limit };
-        let len = all.len();
+        let len = filtered.len();
         let start = offset.min(len);
         let end = (start + effective_limit).min(len);
         let mut page = Vec::new(&env);
-        for i in start..end { page.push_back(all.get(i).unwrap()); }
+        for i in start..end {
+            page.push_back(filtered.get(i).unwrap());
+        }
         Ok(page)
     }
 
@@ -1013,9 +1041,57 @@ mod tests {
         let subject = Address::generate(&env);
         let unknown = Address::generate(&env);
         assert_eq!(
-            client.try_get_history(&subject, &unknown, &0, &10),
+            client.try_get_history(&subject, &unknown, &0, &10, &None, &None),
             Err(Ok(ContractError::ReporterNotFound))
         );
+    }
+
+    #[test]
+    fn test_get_history_with_timestamp_filters() {
+        let (env, _admin, client) = setup();
+        let reporter = Address::generate(&env);
+        let subject = Address::generate(&env);
+        client.add_reporter(&reporter);
+        let reason = String::from_str(&env, "activity");
+        
+        // Submit at timestamp 1000
+        env.ledger().with_mut(|li| li.timestamp = 1000);
+        client.submit_score(&reporter, &subject, &10, &reason);
+        
+        // Submit at timestamp 2000
+        env.ledger().with_mut(|li| {
+            li.sequence_number += 101;
+            li.timestamp = 2000;
+        });
+        client.submit_score(&reporter, &subject, &20, &reason);
+        
+        // Submit at timestamp 3000
+        env.ledger().with_mut(|li| {
+            li.sequence_number += 101;
+            li.timestamp = 3000;
+        });
+        client.submit_score(&reporter, &subject, &30, &reason);
+        
+        // Filter from 1500 - should get 2 entries (2000 and 3000)
+        let filtered = client.get_history(&subject, &reporter, &0, &100, &Some(1500), &None);
+        assert_eq!(filtered.len(), 2);
+        assert_eq!(filtered.get(0).unwrap().submitted_at, 2000);
+        assert_eq!(filtered.get(1).unwrap().submitted_at, 3000);
+        
+        // Filter to 2500 - should get 2 entries (1000 and 2000)
+        let filtered = client.get_history(&subject, &reporter, &0, &100, &None, &Some(2500));
+        assert_eq!(filtered.len(), 2);
+        assert_eq!(filtered.get(0).unwrap().submitted_at, 1000);
+        assert_eq!(filtered.get(1).unwrap().submitted_at, 2000);
+        
+        // Filter from 1500 to 2500 - should get 1 entry (2000)
+        let filtered = client.get_history(&subject, &reporter, &0, &100, &Some(1500), &Some(2500));
+        assert_eq!(filtered.len(), 1);
+        assert_eq!(filtered.get(0).unwrap().submitted_at, 2000);
+        
+        // No filters - should get all 3 entries (backward compatible)
+        let all = client.get_history(&subject, &reporter, &0, &100, &None, &None);
+        assert_eq!(all.len(), 3);
     }
 
     #[test]

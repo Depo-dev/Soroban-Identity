@@ -60,6 +60,8 @@ pub trait ReputationInterface {
         reporter: Address,
         offset: u32,
         limit: u32,
+        from_timestamp: Option<u64>,
+        to_timestamp: Option<u64>,
     ) -> Result<Vec<ScoreEntry>, ContractError>;
 
     fn passes_sybil_check(
@@ -176,8 +178,10 @@ impl ReputationInterface for Reputation {
         reporter: Address,
         offset: u32,
         limit: u32,
+        from_timestamp: Option<u64>,
+        to_timestamp: Option<u64>,
     ) -> Result<Vec<ScoreEntry>, ContractError> {
-        Self::get_history(env, subject, reporter, offset, limit)
+        Self::get_history(env, subject, reporter, offset, limit, from_timestamp, to_timestamp)
     }
 
     fn passes_sybil_check(
