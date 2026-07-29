@@ -25,7 +25,8 @@ Manages DID documents on-chain.
 | Function | Description |
 |---|---|
 | `initialize(admin)` | One-time setup |
-| `transfer_admin(current_admin, new_admin)` | Transfer admin rights (current admin only) |
+| `propose_admin(current_admin, proposed_admin)` | Step 1: propose a new admin (current admin only) |
+| `accept_admin(new_admin)` | Step 2: accept a pending admin proposal (proposed admin only) |
 | `create_did(controller, metadata)` | Mint a new DID |
 | `update_did(controller, metadata)` | Update metadata |
 | `deactivate_did(controller)` | Soft-delete a DID |
@@ -69,6 +70,35 @@ Issuer                Subject               Verifier
   │                     │                      │── verify_credential
   │                     │                      │◀─ true / false
 ```
+
+## Cross-Contract Calls & Reentrancy (Issue #551)
+
+Soroban's execution model prevents classic EVM-style reentrancy at the host
+level, but a contract that performs a cross-contract call is still
+vulnerable to unexpected state if the called contract were ever changed to
+call back into the caller (or into another guarded function) before the
+outer call completes.
+
+**Current cross-contract call graph:**
+
+```
+credential-manager::issue_credential ──▶ identity-registry::has_active_did
+```
+
+This is the only cross-contract call in the codebase today.
+`identity-registry::has_active_did` is a read-only storage lookup — it does
+not call any other contract, so there is currently **no circular
+invocation path**.
+
+**Guard**: `credential-manager::issue_credential` acquires a `ReentrancyGuard`
+(an `EXECUTING` flag in instance storage) immediately before invoking
+`has_active_did`, and releases it via `Drop` on every normal exit path
+(including early `?` returns). A re-entrant call into `issue_credential`
+while that flag is set fails closed with `ContractError::ReentrantCall`
+instead of proceeding against partially-applied state. This is
+defense-in-depth for if a future change makes `has_active_did` (or a
+function it delegates to) call back into `credential-manager`; the pattern
+should be applied to any new function that performs a cross-contract call.
 
 ## Privacy
 

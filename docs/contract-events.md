@@ -22,6 +22,7 @@ Each `contract-event` message includes:
 | `IDENTITY,created` | `[controller: string, timestamp: number]` |
 | `IDENTITY,updated` | `[controller: string, metadataHash: string]` |
 | `IDENTITY,deact` | `[controller: string, timestamp: number]` |
+| `admin,xfer` | `[oldAdmin: string, newAdmin: string]` |
 
 ## credential-manager events
 
@@ -29,6 +30,7 @@ Each `contract-event` message includes:
 | --- | --- |
 | `CRED,issued` | `[id: string, subject: string, issuer: string, credentialType: string]` |
 | `CRED,revoked` | `[id: string, issuer: string]` |
+| `CRED,evicted` | `[issuer: string, evictedId: string]` — emitted when the per-issuer credential ring buffer (`MAX_ISSUER_CREDS`) is full and the oldest entry is dropped to make room for a new one |
 
 ## reputation events
 
