@@ -1,4 +1,5 @@
 #![no_std]
+#![deny(clippy::all)]
 
 //! Reputation contract — on-chain activity scoring and anti-sybil signals.
 //!
@@ -36,6 +37,7 @@ pub enum ContractError {
     ReasonTooLong = 4,
     NotInitialized = 5,
     Unauthorized = 6,
+    DeltaOutOfRange = 7,
 }
 
 /// Minimum ledger interval between submissions from the same reporter for the same subject.
@@ -340,7 +342,7 @@ impl Reputation {
 
         // Validate inputs
         if delta < -100 || delta > 100 {
-            panic!("Delta must be between -100 and 100");
+            return Err(ContractError::DeltaOutOfRange);
         }
         if reason.len() > 256 {
             return Err(ContractError::ReasonTooLong);
