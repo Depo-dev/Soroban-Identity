@@ -24,6 +24,7 @@
   "scripts": {
     "build": "tsc",
     "test": "vitest run",
+    "test:integration": "vitest run --config vitest.integration.config.ts",
     "type-check": "tsc --noEmit"
   },
   "dependencies": {

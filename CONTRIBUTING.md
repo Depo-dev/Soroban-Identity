@@ -48,6 +48,38 @@ npm run build
 npm test
 ```
 
+#### Integration Tests
+
+The SDK includes integration tests that run against a real local Soroban node using Docker. These tests verify:
+- DID create/resolve operations
+- Credential issue/verify/revoke flows
+- Reputation submit/query operations
+- Serialization, fee handling, and contract-SDK compatibility
+
+**Prerequisites:**
+- Docker installed and running
+- `stellar` CLI installed ([installation guide](https://developers.stellar.org/docs/smart-contracts/getting-started/setup))
+
+**Running integration tests locally:**
+
+```bash
+cd sdk
+npm run test:integration
+```
+
+**What happens:**
+1. Starts `stellar/quickstart` Docker container in standalone mode
+2. Deploys fresh contracts for each test run
+3. Runs comprehensive integration tests
+4. Cleans up Docker containers automatically
+
+**Note:** Integration tests take longer (~5-10 minutes) and are not required for every PR. They run automatically on a nightly schedule in CI.
+
+**CI Schedule:**
+- Unit tests: Run on every PR
+- Integration tests: Run nightly at 2 AM UTC
+- Manual trigger: Available via GitHub Actions "Run workflow" button
+
 ### Frontend (React + Vite)
 
 ```bash
