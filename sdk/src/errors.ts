@@ -313,10 +313,54 @@ export class ClaimsValidationError extends Error {
 }
 
 /**
- * Map a free-form error message (panic string, RPC error message,
- * etc.) to the envelope code. Falls back to `UNKNOWN` so call sites
- * can wrap-and-rethrow without case explosion.
+ * Detect whether a thrown value is a network-level transport failure
+ * (ECONNREFUSED, ENOTFOUND, fetch failed, timeout, etc.) rather than
+ * a contract-level or application error.
  */
+export function isNetworkError(err: unknown): boolean {
+  const msg = (err instanceof Error ? err.message : String(err)).toLowerCase();
+  return (
+    /econnrefused|enotfound|econnreset|etimedout|network.*fail|fetch.*fail|socket.*hang/u.test(msg) ||
+    (err instanceof Error && err.name === "FetchError") ||
+    (err instanceof Error && err.name === "TypeError" && msg.includes("fetch"))
+  );
+}
+
+/**
+ * Wrap a network-level error into a `SorobanIdentityError` with:
+ *   - `code: "NETWORK_ERROR"`
+ *   - a message that includes the RPC URL so callers can distinguish
+ *     a misconfigured endpoint from a transient outage
+ *   - `details.cause` holding the original error
+ *
+ * Non-network errors are re-thrown unchanged so contract-level errors
+ * still surface with their original type.
+ *
+ * @param err    The caught error.
+ * @param rpcUrl The Soroban RPC URL that was being contacted.
+ * @param ctx    Optional context label (e.g. `"simulateTransaction"`).
+ */
+export function wrapNetworkError(err: unknown, rpcUrl: string, ctx?: string): never {
+  if (err instanceof SorobanIdentityError) throw err;
+
+  const cause = err instanceof Error ? err : new Error(String(err));
+  const label = ctx ? ` during ${ctx}` : "";
+
+  if (isNetworkError(err)) {
+    throw new SorobanIdentityError(
+      `Network error${label}: unable to reach Soroban RPC at ${rpcUrl} — ${cause.message}`,
+      {
+        code: "NETWORK_ERROR",
+        details: { cause, rpcUrl, context: ctx },
+        originalError: err,
+      }
+    );
+  }
+
+  // Not a network error — re-throw as-is so higher-level handlers can
+  // parse contract codes, simulation failures, etc.
+  throw err;
+}
 export function classifyError(message: string): SorobanErrorCode {
   const m = message.toLowerCase();
   if (/already\s+(registered|exists|active|issued)/u.test(m)) return "ALREADY_EXISTS";

@@ -1,5 +1,8 @@
 import { SorobanRpc, Contract } from "@stellar/stellar-sdk";
 import type { SorobanIdentityConfig, SorobanIdentityLogger } from "./types";
+import { ClientDisposedError, SorobanIdentityError, wrapNetworkError } from "./errors";
+import { SorobanRpc, Contract, TransactionBuilder, Transaction, Account, xdr, BASE_FEE } from "@stellar/stellar-sdk";
+import type { SorobanIdentityConfig, SorobanIdentityLogger, AccountInfo } from "./types";
 import { ClientDisposedError, SorobanIdentityError } from "./errors";
 import { retryWithBackoff } from "./utils";
 
@@ -107,7 +110,12 @@ export abstract class BaseClient {
   }
 
   protected async _checkHealth(): Promise<void> {
-    await retryWithBackoff(() => this.server.getHealth());
+    const rpcUrl = this.servers[this.currentServerIndex]?.serverURL ?? "unknown RPC";
+    try {
+      await retryWithBackoff(() => this.server.getHealth());
+    } catch (err) {
+      wrapNetworkError(err, rpcUrl, "getHealth");
+    }
   }
 
   protected get server(): SorobanRpc.Server {
@@ -194,7 +202,118 @@ export abstract class BaseClient {
         }
       }
 
-      throw lastError;
+      // All servers exhausted — wrap if this was a network-level failure
+      const rpcUrls = this.servers
+        .map((s) => (s as unknown as { serverURL?: string }).serverURL ?? "unknown")
+        .join(", ");
+      wrapNetworkError(lastError, rpcUrls, "executeWithFailover");
+    });
+  }
+
+  /**
+   * Build an unsigned transaction for offline/hardware wallet signing.
+   *
+   * Constructs a valid Soroban transaction from the provided operation and
+   * account info **without making any network calls**. The returned base64 XDR
+   * can be signed by a hardware wallet or air-gapped device, then submitted
+   * with {@link BaseClient.submitSignedTransaction}.
+   *
+   * @example
+   * ```ts
+   * // 1. Build offline — no RPC needed
+   * const { xdr } = client.buildUnsignedTransaction(
+   *   operation,
+   *   { publicKey: 'G...', sequence: '1234567890' }
+   * );
+   * // 2. Sign with hardware wallet
+   * const signedXdr = await hardwareWallet.sign(xdr);
+   * // 3. Submit
+   * const result = await client.submitSignedTransaction(signedXdr);
+   * ```
+   *
+   * @param operation   - The XDR operation to include in the transaction.
+   * @param accountInfo - Account public key and sequence number (fetch once while online).
+   * @param options     - Optional timeout and fee overrides.
+   * @returns Base64-encoded unsigned transaction XDR and its transaction hash.
+   */
+  buildUnsignedTransaction(
+    operation: xdr.Operation,
+    accountInfo: AccountInfo,
+    options?: { timeoutSeconds?: number; fee?: number }
+  ): { xdr: string; hash: string } {
+    const account = new Account(accountInfo.publicKey, accountInfo.sequence);
+    const fee = String(options?.fee ?? BASE_FEE);
+    const timeoutSeconds = options?.timeoutSeconds ?? this.config.txTimeout ?? 30;
+
+    const tx = new TransactionBuilder(account, {
+      fee,
+      networkPassphrase: this.config.networkPassphrase,
+    })
+      .addOperation(operation)
+      .setTimeout(timeoutSeconds)
+      .build();
+
+    return {
+      xdr: tx.toXDR(),
+      hash: tx.hash().toString("hex"),
+    };
+  }
+
+  /**
+   * Submit a signed transaction XDR to the network.
+   *
+   * Use this after signing a transaction produced by
+   * {@link BaseClient.buildUnsignedTransaction} with a hardware wallet or
+   * air-gapped signer. Polls for confirmation and resolves once the transaction
+   * is included in a successful ledger.
+   *
+   * @example
+   * ```ts
+   * const signedXdr = await hardwareWallet.sign(unsignedXdr);
+   * const { hash } = await client.submitSignedTransaction(signedXdr);
+   * console.log('confirmed on-chain:', hash);
+   * ```
+   *
+   * @param signedXdr - Base64-encoded signed transaction XDR.
+   * @returns Transaction hash on success.
+   * @throws {SorobanIdentityError} on submission failure or confirmation timeout.
+   */
+  async submitSignedTransaction(signedXdr: string): Promise<{ hash: string }> {
+    const tx = TransactionBuilder.fromXDR(
+      signedXdr,
+      this.config.networkPassphrase
+    ) as Transaction;
+
+    return this.executeWithFailover(async (server) => {
+      const result = await server.sendTransaction(tx);
+      if (result.status !== "PENDING") {
+        throw new SorobanIdentityError(
+          `Transaction submission failed with status: ${result.status}`,
+          "CONTRACT_ERROR"
+        );
+      }
+
+      const pollRetries = this.config.pollingRetries ?? 10;
+      const pollInterval = this.config.pollingIntervalMs ?? 2000;
+
+      for (let i = 0; i < pollRetries; i++) {
+        await new Promise<void>((resolve) => setTimeout(resolve, pollInterval));
+        const status = await server.getTransaction(result.hash);
+        if (status.status === SorobanRpc.Api.GetTransactionStatus.SUCCESS) {
+          return { hash: result.hash };
+        }
+        if (status.status === SorobanRpc.Api.GetTransactionStatus.FAILED) {
+          throw new SorobanIdentityError("Transaction failed on-chain", {
+            code: "CONTRACT_ERROR",
+            txHash: result.hash,
+          });
+        }
+      }
+
+      throw new SorobanIdentityError(
+        `Transaction confirmation timeout (hash: ${result.hash}). The transaction was broadcast and may still succeed — check its status via this hash before resubmitting.`,
+        { code: "TIMEOUT", txHash: result.hash }
+      );
     });
   }
 }

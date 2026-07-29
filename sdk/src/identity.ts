@@ -30,6 +30,7 @@ import {
   buildResolveDidArgs,
   buildHasActiveDidArgs,
   buildDeactivateDidArgs,
+  buildDidExistsArgs,
 } from "./contract-args";
 
 // Dummy address used for lightweight initialization probes
@@ -397,18 +398,28 @@ export class IdentityClient extends BaseClient {
   }
 
   /**
-   * Check if an address has ever registered a DID (active or deactivated).
+   * Lightweight existence check for a DID, regardless of activation status.
    *
-   * Unlike {@link IdentityClient.hasActiveDid}, this returns `true` even for
-   * deactivated DIDs. Use this for a lightweight existence check without
-   * fetching the full document.
+   * Returns `true` if a DID document exists for the given address (active or
+   * deactivated), `false` otherwise. This avoids the overhead of calling
+   * `resolveDid` and catching the not-found error when only an existence check
+   * is needed.
    *
    * @param controllerAddress The Stellar address to check.
    * @param options           Per-call overrides (currently `timeoutSeconds`).
-   * @returns `true` if a DID record exists for this address, `false` otherwise.
+   * @returns `true` if a DID exists (active or deactivated), `false` otherwise.
    * @throws {SorobanIdentityError} on simulation failure.
+   *
+   * @example
+   * ```ts
+   * const exists = await identity.exists('GABC...');
+   * if (exists) {
+   *   const doc = await identity.resolveDid('GABC...');
+   *   console.log(doc.active ? 'Active' : 'Deactivated');
+   * }
+   * ```
    */
-  async didExists(controllerAddress: string, options?: CallOptions): Promise<boolean> {
+  async exists(controllerAddress: string, options?: CallOptions): Promise<boolean> {
     validateStellarAddress(controllerAddress);
     const account = new Account(controllerAddress, "0");
     const timeout = options?.timeoutSeconds ?? this.config.txTimeout ?? 30;
@@ -420,7 +431,7 @@ export class IdentityClient extends BaseClient {
       .addOperation(
         this.contract.call(
           "did_exists",
-          ...buildHasActiveDidArgs({ controller: controllerAddress })
+          ...buildDidExistsArgs({ controller: controllerAddress })
         )
       )
       .setTimeout(timeout)
@@ -428,7 +439,7 @@ export class IdentityClient extends BaseClient {
 
     const result = await retryWithBackoff(() => this.server.simulateTransaction(tx));
     const isSimulationError = SorobanRpc.Api.isSimulationError(result);
-    this.debug('sdk.simulation_result', { operation: 'identity.didExists', success: !isSimulationError });
+    this.debug('sdk.simulation_result', { operation: 'identity.exists', success: !isSimulationError });
     if (isSimulationError) return false;
 
     const native = scValToNative(
