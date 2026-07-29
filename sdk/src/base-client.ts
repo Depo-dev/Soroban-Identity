@@ -1,3 +1,6 @@
+import { SorobanRpc, Contract } from "@stellar/stellar-sdk";
+import type { SorobanIdentityConfig, SorobanIdentityLogger } from "./types";
+import { ClientDisposedError, SorobanIdentityError, wrapNetworkError } from "./errors";
 import { SorobanRpc, Contract, TransactionBuilder, Transaction, Account, xdr, BASE_FEE } from "@stellar/stellar-sdk";
 import type { SorobanIdentityConfig, SorobanIdentityLogger, AccountInfo } from "./types";
 import { ClientDisposedError, SorobanIdentityError } from "./errors";
@@ -107,7 +110,12 @@ export abstract class BaseClient {
   }
 
   protected async _checkHealth(): Promise<void> {
-    await retryWithBackoff(() => this.server.getHealth());
+    const rpcUrl = this.servers[this.currentServerIndex]?.serverURL ?? "unknown RPC";
+    try {
+      await retryWithBackoff(() => this.server.getHealth());
+    } catch (err) {
+      wrapNetworkError(err, rpcUrl, "getHealth");
+    }
   }
 
   protected get server(): SorobanRpc.Server {
@@ -194,7 +202,11 @@ export abstract class BaseClient {
         }
       }
 
-      throw lastError;
+      // All servers exhausted — wrap if this was a network-level failure
+      const rpcUrls = this.servers
+        .map((s) => (s as unknown as { serverURL?: string }).serverURL ?? "unknown")
+        .join(", ");
+      wrapNetworkError(lastError, rpcUrls, "executeWithFailover");
     });
   }
 
