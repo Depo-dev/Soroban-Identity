@@ -35,7 +35,7 @@ Manages DID documents on-chain.
 
 ### credential-manager
 
-Issues and verifies verifiable credentials. A maximum of **100 issuers** (`MAX_ISSUERS`) can be registered at any time; `add_issuer` panics with `MaxIssuersReached` if the cap is hit.
+Issues and verifies verifiable credentials. A maximum of **100 issuers** (`MAX_ISSUERS`) can be registered at any time by default; `add_issuer` returns `MaxIssuersReached` if the cap is hit. The admin can raise or lower this cap via `set_max_issuers`, up to a hard ceiling of **500 issuers** (`ABSOLUTE_MAX_ISSUERS`).
 
 | Function | Description |
 |---|---|
@@ -43,6 +43,7 @@ Issues and verifies verifiable credentials. A maximum of **100 issuers** (`MAX_I
 | `transfer_admin(current_admin, new_admin)` | Transfer admin rights (current admin only) |
 | `add_issuer(issuer)` | Register a trusted issuer (admin) |
 | `remove_issuer(issuer)` | Remove an issuer (admin) |
+| `set_max_issuers(admin, new_max)` | Raise or lower the issuer cap, up to `ABSOLUTE_MAX_ISSUERS` (admin) |
 | `issue_credential(issuer, subject, type, claims, claims_hash, sig, expires)` | Issue a credential |
 | `revoke_credential(issuer, id)` | Revoke a credential |
 | `verify_credential(id)` | Check validity |

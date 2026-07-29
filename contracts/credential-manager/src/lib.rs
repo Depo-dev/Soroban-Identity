@@ -33,6 +33,7 @@ const IDENTITY_REGISTRY: Symbol = symbol_short!("IDREGIST");
 const EXECUTING: Symbol = symbol_short!("EXEC");
 
 const MAX_ISSUERS: u32 = 100;
+const ABSOLUTE_MAX_ISSUERS: u32 = 500;
 const MAX_ISSUER_CREDS: u32 = 10_000;
 const TTL_MAX: u32 = 6_312_000;
 const TTL_MIN: u32 = 17_280;
@@ -197,6 +198,28 @@ impl CredentialManager {
         Ok(())
     }
 
+    pub fn set_max_issuers(env: Env, admin: Address, new_max: u32) -> Result<(), ContractError> {
+        admin.require_auth();
+        let stored: Address = env.storage().instance().get(&ADMIN).ok_or(ContractError::NotInitialized)?;
+        if stored != admin {
+            return Err(ContractError::Unauthorized);
+        }
+        if new_max == 0 || new_max > ABSOLUTE_MAX_ISSUERS {
+            return Err(ContractError::InvalidMaxIssuers);
+        }
+        let old_max = Self::get_max_issuers_internal(&env);
+        env.storage().instance().set(&MAX_ISSUERS_CFG, &new_max);
+        env.events().publish(
+            (ADMIN, Symbol::new(&env, "admin_config_changed")),
+            (EVENT_VERSION, symbol_short!("max_iss"), old_max, new_max),
+        );
+        Ok(())
+    }
+
+    pub fn get_max_issuers(env: Env) -> u32 {
+        Self::get_max_issuers_internal(&env)
+    }
+
     pub fn remove_issuer(env: Env, issuer: Address) -> Result<(), ContractError> {
         Self::require_admin(&env)?;
         let issuers = Self::get_issuers_internal(&env);
@@ -209,6 +232,9 @@ impl CredentialManager {
     pub fn register_schema(env: Env, issuer: Address, schema_hash: BytesN<32>) -> Result<(), ContractError> {
         issuer.require_auth();
         Self::require_issuer(&env, &issuer)?;
+        if schema_hash == BytesN::from_array(&env, &[0u8; 32]) {
+            return Err(ContractError::InvalidSchemaHash);
+        }
         let schema_key = (SCHEMA, issuer.clone(), schema_hash.clone());
         env.storage().persistent().set(&schema_key, &true);
         env.storage().persistent().extend_ttl(&schema_key, TTL_MAX, TTL_MAX);
@@ -863,6 +889,60 @@ mod tests {
         let fresh = client.get_credential(&new_id);
         assert!(!fresh.revoked);
         assert_eq!(fresh.id, new_id);
+    }
+
+    #[test]
+    fn test_register_schema_rejects_zero_hash() {
+        let (env, _admin, client) = setup();
+        let issuer = Address::generate(&env);
+        client.add_issuer(&issuer);
+        let zero_hash = BytesN::from_array(&env, &[0u8; 32]);
+        let result = client.try_register_schema(&issuer, &zero_hash);
+        assert_eq!(result, Err(Ok(ContractError::InvalidSchemaHash)));
+    }
+
+    #[test]
+    fn test_set_max_issuers_allows_admin_override() {
+        let (env, admin, client) = setup();
+        assert_eq!(client.get_max_issuers(), MAX_ISSUERS);
+
+        client.set_max_issuers(&admin, &1);
+        let issuer_a = Address::generate(&env);
+        let issuer_b = Address::generate(&env);
+        client.add_issuer(&issuer_a);
+        assert_eq!(
+            client.try_add_issuer(&issuer_b),
+            Err(Ok(ContractError::MaxIssuersReached))
+        );
+
+        client.set_max_issuers(&admin, &2);
+        client.add_issuer(&issuer_b);
+        assert_eq!(client.get_issuers().len(), 2);
+    }
+
+    #[test]
+    fn test_set_max_issuers_enforces_absolute_ceiling() {
+        let (_env, admin, client) = setup();
+        assert_eq!(
+            client.try_set_max_issuers(&admin, &(ABSOLUTE_MAX_ISSUERS + 1)),
+            Err(Ok(ContractError::InvalidMaxIssuers))
+        );
+        assert_eq!(
+            client.try_set_max_issuers(&admin, &0),
+            Err(Ok(ContractError::InvalidMaxIssuers))
+        );
+        client.set_max_issuers(&admin, &ABSOLUTE_MAX_ISSUERS);
+        assert_eq!(client.get_max_issuers(), ABSOLUTE_MAX_ISSUERS);
+    }
+
+    #[test]
+    fn test_set_max_issuers_rejects_non_admin() {
+        let (env, _admin, client) = setup();
+        let attacker = Address::generate(&env);
+        assert_eq!(
+            client.try_set_max_issuers(&attacker, &200),
+            Err(Ok(ContractError::Unauthorized))
+        );
     }
 
     #[test]
