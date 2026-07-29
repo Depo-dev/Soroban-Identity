@@ -1,4 +1,5 @@
 #![no_std]
+#![deny(clippy::all)]
 
 use soroban_sdk::{
     contract, contracterror, contractimpl, contracttype, symbol_short,
@@ -58,7 +59,7 @@ pub enum ContractError {
     /// Issue #551: a guarded function was re-entered while a prior
     /// invocation (which is mid cross-contract call) had not yet completed.
     ReentrantCall = 14,
-    SubjectHasNoDid = 14,
+    SubjectHasNoDid = 15,
 }
 
 // ── Data types ────────────────────────────────────────────────────────────────
@@ -190,7 +191,6 @@ impl CredentialManager {
             if issuers.len() >= Self::effective_max_issuers(&env) {
                 return Err(ContractError::MaxIssuersReached);
             }
-            if issuers.len() >= MAX_ISSUERS { return Err(ContractError::MaxIssuersReached); }
             issuers.push_back(issuer.clone());
             env.storage().instance().set(&ISSUER, &issuers);
             env.events().publish((ISSUER, symbol_short!("added")), (EVENT_VERSION, issuer));
@@ -224,7 +224,11 @@ impl CredentialManager {
         Self::require_admin(&env)?;
         let issuers = Self::get_issuers_internal(&env);
         let mut updated = Vec::new(&env);
-        for i in issuers.iter() { if i != issuer { updated.push_back(i); } }
+        for i in issuers.iter() {
+            if i != issuer {
+                updated.push_back(i);
+            }
+        }
         env.storage().instance().set(&ISSUER, &updated);
         Ok(())
     }

@@ -1,4 +1,5 @@
 #![no_std]
+#![deny(clippy::all)]
 
 //! Reputation contract — on-chain activity scoring and anti-sybil signals.
 
@@ -240,7 +241,9 @@ impl Reputation {
         let reporters = Self::get_reporters(&env);
         let mut updated = Vec::new(&env);
         for r in reporters.iter() {
-            if r != reporter { updated.push_back(r); }
+            if r != reporter {
+                updated.push_back(r);
+            }
         }
         env.storage().instance().set(&REPORTER, &updated);
         env.events().publish(
@@ -661,7 +664,9 @@ impl Reputation {
     // ── Helpers ───────────────────────────────────────────────────────────────
 
     fn require_uninitialized(env: &Env) -> Result<(), ContractError> {
-        if env.storage().instance().has(&ADMIN) { return Err(ContractError::AlreadyInitialized); }
+        if env.storage().instance().has(&ADMIN) {
+            return Err(ContractError::AlreadyInitialized);
+        }
         Ok(())
     }
 
@@ -676,7 +681,9 @@ impl Reputation {
     }
 
     fn require_reporter(env: &Env, reporter: &Address) -> Result<(), ContractError> {
-        if !Self::get_reporters(env).contains(reporter) { return Err(ContractError::ReporterNotFound); }
+        if !Self::get_reporters(env).contains(reporter) {
+            return Err(ContractError::ReporterNotFound);
+        }
         Ok(())
     }
 
@@ -688,8 +695,13 @@ impl Reputation {
         (RECORD, subject.clone())
     }
 
-    fn history_key(subject: &Address, reporter: &Address) -> (Symbol, Address, Address) { (HISTORY, subject.clone(), reporter.clone()) }
-    fn rate_key(subject: &Address, reporter: &Address) -> (Symbol, Address, Address) { (RATE_LIMIT, subject.clone(), reporter.clone()) }
+    fn history_key(subject: &Address, reporter: &Address) -> (Symbol, Address, Address) {
+        (HISTORY, subject.clone(), reporter.clone())
+    }
+
+    fn rate_key(subject: &Address, reporter: &Address) -> (Symbol, Address, Address) {
+        (RATE_LIMIT, subject.clone(), reporter.clone())
+    }
 
     /// Checks rate limit for (subject, reporter) and sets it. Call only during write phase.
     fn check_and_set_rate_limit(env: &Env, subject: &Address, reporter: &Address) -> Result<(), ContractError> {
