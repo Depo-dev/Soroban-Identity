@@ -43,6 +43,8 @@ pub enum ContractError {
     NotPendingAdmin = 11,
     SchemaNotFound = 12,
     CredentialNotExpiredYet = 13,
+    /// New expiry must be strictly later than the current expiry
+    NewExpiryNotLater = 14,
 }
 
 // ── Data types ────────────────────────────────────────────────────────────────
@@ -288,6 +290,67 @@ impl CredentialManager {
         env.storage().instance().set(&REVOKED_CNT, &(revoked + 1));
         cred.revoked = true;
         env.storage().persistent().set(&key, &cred);
+        Ok(())
+    }
+
+    /// Renew a credential by extending its expiry without changing the credential ID.
+    ///
+    /// Only the original issuer may call this function. The credential must
+    /// not be revoked. The new expiry must be strictly greater than the
+    /// current `expires_at` (or any positive future time if `expires_at` is 0).
+    ///
+    /// Emits a `credential_renewed` event.
+    ///
+    /// # Errors
+    /// - `CredentialNotFound`  — credential ID does not exist
+    /// - `UnauthorizedIssuer` — caller is not the original issuer
+    /// - `CredentialRevoked`  — credential has been revoked and cannot be renewed
+    /// - `NewExpiryNotLater`  — new_expires_at is not greater than the current expiry
+    pub fn renew_credential(
+        env: Env,
+        issuer: Address,
+        credential_id: BytesN<32>,
+        new_expires_at: u64,
+    ) -> Result<(), ContractError> {
+        issuer.require_auth();
+
+        let key = Self::cred_key(&credential_id);
+        let mut cred: Credential = env
+            .storage()
+            .persistent()
+            .get(&key)
+            .ok_or(ContractError::CredentialNotFound)?;
+
+        // Only the original issuer may renew
+        if cred.issuer != issuer {
+            return Err(ContractError::UnauthorizedIssuer);
+        }
+
+        // Revoked credentials cannot be renewed
+        if cred.revoked {
+            return Err(ContractError::CredentialRevoked);
+        }
+
+        // New expiry must be strictly later than the current one.
+        // If the credential has no expiry (0) we still require new_expires_at > 0
+        // so the caller makes an explicit choice.
+        if new_expires_at == 0 || new_expires_at <= cred.expires_at {
+            return Err(ContractError::NewExpiryNotLater);
+        }
+
+        // Update the expiry
+        cred.expires_at = new_expires_at;
+        env.storage().persistent().set(&key, &cred);
+
+        // Refresh the storage TTL to match the new expiry
+        let ttl = Self::ttl_for_credential(&env, new_expires_at);
+        env.storage().persistent().extend_ttl(&key, ttl, ttl);
+
+        env.events().publish(
+            (CRED, symbol_short!("renewed")),
+            (EVENT_VERSION, credential_id, issuer, new_expires_at),
+        );
+
         Ok(())
     }
 
@@ -720,6 +783,175 @@ mod tests {
         let page2 = client.list_subject_credentials(&subject, &page1.next_cursor, &2, &None);
         assert_eq!(page2.items.len(), 1);
         assert_eq!(page2.next_cursor, None);
+    }
+
+    // ── renew_credential tests (#595) ─────────────────────────────────────────
+
+    #[test]
+    fn test_renew_credential_extends_expiry_preserving_id() {
+        let (env, _admin, client) = setup();
+        let issuer = Address::generate(&env);
+        let subject = Address::generate(&env);
+        client.add_issuer(&issuer);
+
+        let expires_at = env.ledger().timestamp() + 1000;
+        let cred_id = client.issue_credential(
+            &issuer, &subject, &CredentialType::Kyc,
+            &Map::new(&env), &BytesN::from_array(&env, &[1u8; 32]),
+            &Bytes::from_array(&env, &[0u8; 64]), &expires_at, &None,
+        );
+
+        let new_expires_at = expires_at + 5000;
+        client.renew_credential(&issuer, &cred_id, &new_expires_at);
+
+        // Credential ID unchanged
+        let renewed = client.get_credential(&cred_id);
+        assert_eq!(renewed.id, cred_id);
+        // Expiry updated
+        assert_eq!(renewed.expires_at, new_expires_at);
+        // Still not revoked
+        assert!(!renewed.revoked);
+    }
+
+    #[test]
+    fn test_renew_credential_emits_event() {
+        let (env, _admin, client) = setup();
+        let issuer = Address::generate(&env);
+        let subject = Address::generate(&env);
+        client.add_issuer(&issuer);
+
+        let expires_at = env.ledger().timestamp() + 1000;
+        let cred_id = client.issue_credential(
+            &issuer, &subject, &CredentialType::Kyc,
+            &Map::new(&env), &BytesN::from_array(&env, &[1u8; 32]),
+            &Bytes::from_array(&env, &[0u8; 64]), &expires_at, &None,
+        );
+
+        let new_expires_at = expires_at + 5000;
+        client.renew_credential(&issuer, &cred_id, &new_expires_at);
+
+        // The event system in the test env records all published events
+        let events = env.events().all();
+        let has_renewed = events.iter().any(|ev| {
+            // topic bytes contain "renewed"
+            let topic_str = format!("{:?}", ev);
+            topic_str.contains("renewed")
+        });
+        assert!(has_renewed, "credential_renewed event should have been emitted");
+    }
+
+    #[test]
+    #[should_panic(expected = "Error(Contract, #2)")]
+    fn test_renew_credential_non_issuer_rejected() {
+        let (env, _admin, client) = setup();
+        let issuer = Address::generate(&env);
+        let non_issuer = Address::generate(&env);
+        let subject = Address::generate(&env);
+        client.add_issuer(&issuer);
+
+        let expires_at = env.ledger().timestamp() + 1000;
+        let cred_id = client.issue_credential(
+            &issuer, &subject, &CredentialType::Kyc,
+            &Map::new(&env), &BytesN::from_array(&env, &[1u8; 32]),
+            &Bytes::from_array(&env, &[0u8; 64]), &expires_at, &None,
+        );
+
+        // non_issuer tries to renew — must fail with UnauthorizedIssuer(2)
+        client.renew_credential(&non_issuer, &cred_id, &(expires_at + 1000));
+    }
+
+    #[test]
+    #[should_panic(expected = "Error(Contract, #4)")]
+    fn test_renew_revoked_credential_rejected() {
+        let (env, _admin, client) = setup();
+        let issuer = Address::generate(&env);
+        let subject = Address::generate(&env);
+        client.add_issuer(&issuer);
+
+        let expires_at = env.ledger().timestamp() + 1000;
+        let cred_id = client.issue_credential(
+            &issuer, &subject, &CredentialType::Kyc,
+            &Map::new(&env), &BytesN::from_array(&env, &[1u8; 32]),
+            &Bytes::from_array(&env, &[0u8; 64]), &expires_at, &None,
+        );
+
+        client.revoke_credential(&issuer, &cred_id);
+        // Revoked credential — must fail with CredentialRevoked(4)
+        client.renew_credential(&issuer, &cred_id, &(expires_at + 1000));
+    }
+
+    #[test]
+    #[should_panic(expected = "Error(Contract, #14)")]
+    fn test_renew_with_earlier_expiry_rejected() {
+        let (env, _admin, client) = setup();
+        let issuer = Address::generate(&env);
+        let subject = Address::generate(&env);
+        client.add_issuer(&issuer);
+
+        let expires_at = env.ledger().timestamp() + 5000;
+        let cred_id = client.issue_credential(
+            &issuer, &subject, &CredentialType::Kyc,
+            &Map::new(&env), &BytesN::from_array(&env, &[1u8; 32]),
+            &Bytes::from_array(&env, &[0u8; 64]), &expires_at, &None,
+        );
+
+        // new_expires_at <= current expires_at — must fail with NewExpiryNotLater(14)
+        client.renew_credential(&issuer, &cred_id, &(expires_at - 1));
+    }
+
+    #[test]
+    #[should_panic(expected = "Error(Contract, #14)")]
+    fn test_renew_with_zero_expiry_rejected() {
+        let (env, _admin, client) = setup();
+        let issuer = Address::generate(&env);
+        let subject = Address::generate(&env);
+        client.add_issuer(&issuer);
+
+        let expires_at = env.ledger().timestamp() + 1000;
+        let cred_id = client.issue_credential(
+            &issuer, &subject, &CredentialType::Kyc,
+            &Map::new(&env), &BytesN::from_array(&env, &[1u8; 32]),
+            &Bytes::from_array(&env, &[0u8; 64]), &expires_at, &None,
+        );
+
+        // new_expires_at == 0 is not allowed
+        client.renew_credential(&issuer, &cred_id, &0u64);
+    }
+
+    #[test]
+    #[should_panic(expected = "Error(Contract, #3)")]
+    fn test_renew_nonexistent_credential_rejected() {
+        let (env, _admin, client) = setup();
+        let issuer = Address::generate(&env);
+        client.add_issuer(&issuer);
+
+        let fake_id = BytesN::from_array(&env, &[255u8; 32]);
+        // ID does not exist — must fail with CredentialNotFound(3)
+        client.renew_credential(&issuer, &fake_id, &(env.ledger().timestamp() + 1000));
+    }
+
+    #[test]
+    fn test_renew_credential_credential_still_valid_after_original_expiry() {
+        let (env, _admin, client) = setup();
+        let issuer = Address::generate(&env);
+        let subject = Address::generate(&env);
+        client.add_issuer(&issuer);
+
+        let expires_at = env.ledger().timestamp() + 500;
+        let cred_id = client.issue_credential(
+            &issuer, &subject, &CredentialType::Kyc,
+            &Map::new(&env), &BytesN::from_array(&env, &[1u8; 32]),
+            &Bytes::from_array(&env, &[0u8; 64]), &expires_at, &None,
+        );
+
+        let new_expires_at = expires_at + 10_000;
+        client.renew_credential(&issuer, &cred_id, &new_expires_at);
+
+        // Advance past the original expiry but before the new one
+        env.ledger().with_mut(|l| l.timestamp = expires_at + 1);
+
+        // Should still verify successfully with the extended expiry
+        client.verify_credential(&cred_id);
     }
 
     #[test]
