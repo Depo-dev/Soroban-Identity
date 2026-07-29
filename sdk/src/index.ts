@@ -1,15 +1,31 @@
-export { IdentityClient } from "./identity";
-export { CredentialClient } from "./credentials";
-export { ReputationClient } from "./reputation";
-export { SorobanIdentityError, parseContractError } from "./errors";
-export type { SorobanErrorCode } from "./errors";
-export * as v1 from './v1';
+// ── Core clients ──────────────────────────────────────────────────────────────
 export { IdentityClient } from './identity';
-export { health, healthCheck } from './health';
-export type { HealthResult, HealthCheckResult } from './health';
 export { CredentialClient } from './credentials';
 export type { CredentialInput, BatchOptions, BatchResult } from './credentials';
 export { ReputationClient } from './reputation';
+export type { ReputationRecord, ScoreHistoryEntry } from './reputation';
+
+// ── Base client (multi-sig pipeline, closes #564) ─────────────────────────────
+//
+// All SDK clients extend BaseClient which exposes:
+//   buildUnsignedTransaction(operation, accountInfo, options?) → { xdr, hash }
+//   submitSignedTransaction(signedXdr) → { hash }
+//
+// Multi-sig workflow:
+//   1. Fetch account once while online:
+//        const account = await server.getAccount(signerA);
+//        const accountInfo = { publicKey: signerA, sequence: account.sequence };
+//   2. Build the unsigned transaction (no RPC needed):
+//        const { xdr } = client.buildUnsignedTransaction(operation, accountInfo);
+//   3. Route the XDR to each required signer (hardware wallet, air-gap device, etc.):
+//        const signed1 = await walletA.sign(xdr);
+//        const signed2 = await walletB.sign(signed1); // attach second signature
+//   4. Submit the fully-signed transaction:
+//        const { hash } = await client.submitSignedTransaction(signed2);
+export { BaseClient, getOrCreateServer, clearServerCache, SDK_VERSION } from './base-client';
+export type { AccountInfo } from './types';
+
+// ── Presentation ──────────────────────────────────────────────────────────────
 export { PresentationClient } from './presentation';
 export type {
   VerifiablePresentation,
@@ -18,19 +34,25 @@ export type {
   PresentationVerifyResult,
   PresentationVerifyFailReason,
 } from './presentation';
+
+// ── Events ────────────────────────────────────────────────────────────────────
 export { SorobanEventListener, getEvents, subscribeToEvents } from './events';
-export type { SubscribeOptions } from './events';
+export type { SubscribeOptions, EventFilter, ContractEvent, GetEventsOptions } from './events';
+
+// ── Health ────────────────────────────────────────────────────────────────────
+export { health, healthCheck } from './health';
+export type { HealthResult, HealthCheckResult } from './health';
+
+// ── Server info ───────────────────────────────────────────────────────────────
 export { getServerInfo, UnsupportedEndpointError } from './server-info';
 export type { ServerInfo } from './server-info';
+
+// ── Transaction helpers ───────────────────────────────────────────────────────
 export { SorobanTransactionBuilder } from './transaction-builder';
-export { RequestQueue } from './request-queue';
-export {
-  retryWithBackoff,
-  checkConnection,
-  validateStellarAddress,
-  computeCredentialId,
-  runConcurrent,
-} from './utils';
+export { executeTransaction } from './transaction';
+export type { TxOptions } from './transaction';
+
+// ── Errors ────────────────────────────────────────────────────────────────────
 export {
   ContractError,
   SorobanIdentityError,
@@ -38,22 +60,37 @@ export {
   ClientDisposedError,
   classifyError,
   wrapError,
+  parseContractError,
 } from './errors';
-export { UnknownCredentialTypeError, assertCredentialType } from './types';
-export type {
-  SorobanErrorCode,
-  SorobanIdentityErrorInit,
-} from './errors';
-// #249 / #252 / #253 / #254 — server-layer helpers.
-export * from './server';
+export type { SorobanErrorCode, SorobanIdentityErrorInit } from './errors';
 export {
   SorobanErrorCodes,
   IDENTITY_REGISTRY_ERRORS,
   CREDENTIAL_MANAGER_ERRORS,
   REPUTATION_ERRORS,
 } from './error-codes';
-export { clearServerCache, SDK_VERSION } from './base-client';
-export { toW3CDidDocument, exportDidDocumentAsJsonLd, flattenSubject, serializeClaimValue, hashSubjectClaims } from './serializers';
+
+// ── Utils ─────────────────────────────────────────────────────────────────────
+export {
+  retryWithBackoff,
+  checkConnection,
+  validateStellarAddress,
+  computeCredentialId,
+  runConcurrent,
+  pollTransactionStatus,
+} from './utils';
+export { RequestQueue } from './request-queue';
+
+// ── Serializers ───────────────────────────────────────────────────────────────
+export {
+  toW3CDidDocument,
+  exportDidDocumentAsJsonLd,
+  flattenSubject,
+  serializeClaimValue,
+  hashSubjectClaims,
+} from './serializers';
+
+// ── Contract arg builders ─────────────────────────────────────────────────────
 export {
   buildCreateDidArgs,
   buildUpdateDidArgs,
@@ -62,6 +99,7 @@ export {
   buildDeactivateDidArgs,
   buildIssueCredentialArgs,
   buildRevokeCredentialArgs,
+  buildRevokeBatchArgs,
   buildVerifyCredentialArgs,
   buildGetCredentialArgs,
   buildGetSubjectCredentialsArgs,
@@ -69,6 +107,8 @@ export {
   buildGetCredentialCountArgs,
   buildListSubjectCredentialsArgs,
   buildListIssuersArgs,
+  buildGetIssuerCredentialsArgs,
+  buildListIssuerCredentialsArgs,
   buildGetReputationArgs,
   buildGetHistoryArgs,
   buildPassesSybilCheckDefaultArgs,
@@ -76,9 +116,9 @@ export {
   buildSubmitScoreArgs,
   buildListReportersArgs,
   buildListHistoryArgs,
-  buildGetIssuerCredentialsArgs,
-  buildListIssuerCredentialsArgs,
 } from './contract-args';
+
+// ── Types ─────────────────────────────────────────────────────────────────────
 export type {
   DidDocument,
   ServiceEndpoint,
@@ -89,27 +129,27 @@ export type {
   VerifyResult,
   VerifyFailReason,
   SorobanIdentityConfig,
-  ReputationRecord,
-  ScoreHistoryEntry,
-} from "./types";
-export { executeTransaction } from "./transaction";
-export type { TxOptions } from "./transaction";
+  SorobanIdentityLogger,
   CallOptions,
+  WriteResult,
+  SorobanResponse,
   IdentityStorageStats,
   CredentialStorageStats,
   ReputationStorageStats,
   Page,
   PaginationOptions,
-  SorobanIdentityContractIdField,
-  ValidateConfigOptions,
-  SorobanResponse,
+  FeeEstimate,
 } from './types';
-export { validateConfig } from './types';
-export type { ReputationRecord, ScoreHistoryEntry } from './reputation';
-export type { EventFilter, ContractEvent, GetEventsOptions } from './events';
-export type { SorobanIdentityConfig, SorobanIdentityLogger, WriteResult } from './types';
+export { validateConfig, assertCredentialType, UnknownCredentialTypeError, SimulationError } from './types';
 
-// Testnet defaults — fill contract IDs after deployment
+// ── OpenAPI / v1 ──────────────────────────────────────────────────────────────
+export * as v1 from './v1';
+export * from './server';
+
+// ── Network configs ───────────────────────────────────────────────────────────
+import type { SorobanIdentityConfig } from './types';
+
+/** Testnet defaults — fill contract IDs after deployment. */
 export const TESTNET_CONFIG: SorobanIdentityConfig = {
   rpcUrl: ['https://soroban-testnet.stellar.org', 'https://soroban-testnet-backup.stellar.org'],
   networkPassphrase: 'Test SDF Network ; September 2015',
@@ -118,7 +158,7 @@ export const TESTNET_CONFIG: SorobanIdentityConfig = {
   reputationId: '',
 };
 
-// Mainnet defaults — fill contract IDs after deployment
+/** Mainnet defaults — fill contract IDs after deployment. */
 export const MAINNET_CONFIG: SorobanIdentityConfig = {
   rpcUrl: ['https://soroban-mainnet.stellar.org', 'https://soroban-mainnet-backup.stellar.org'],
   networkPassphrase: 'Public Global Stellar Network ; September 2015',
@@ -126,5 +166,3 @@ export const MAINNET_CONFIG: SorobanIdentityConfig = {
   credentialManagerId: '',
   reputationId: '',
 };
-export type { FeeEstimate } from './types';
-export { SimulationError } from './types';

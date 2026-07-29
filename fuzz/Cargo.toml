@@ -1,0 +1,40 @@
+[package]
+name = "soroban-identity-fuzz"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+# cargo-fuzz requires the workspace to be declared here so it is isolated
+[workspace]
+members = ["."]
+
+[dependencies]
+libfuzzer-sys = "0.4"
+arbitrary = { version = "1.3", features = ["derive"] }
+soroban-sdk = { version = "21.0.0", features = ["testutils"] }
+identity-registry = { path = "../contracts/identity-registry" }
+credential-manager = { path = "../contracts/credential-manager" }
+reputation = { path = "../contracts/reputation" }
+
+[[bin]]
+name = "fuzz_create_did"
+path = "fuzz_targets/fuzz_create_did.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "fuzz_issue_credential"
+path = "fuzz_targets/fuzz_issue_credential.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "fuzz_submit_score"
+path = "fuzz_targets/fuzz_submit_score.rs"
+test = false
+doc = false
+
+[profile.release]
+# Fuzzing requires debug info for useful stack traces
+opt-level = 3
+debug = true

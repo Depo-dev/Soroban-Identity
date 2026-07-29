@@ -1,0 +1,14 @@
+# Fuzz target build artifacts
+target/
+
+# Crash artifacts (commit these if they represent regressions to fix)
+artifacts/
+
+# Corpus files (optionally commit interesting seeds)
+corpus/
+
+# Coverage data
+coverage/
+
+# Lock file
+Cargo.lock

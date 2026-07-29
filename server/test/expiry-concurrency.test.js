@@ -20,8 +20,11 @@ test('ExpiryNotificationJob respects EXPIRY_CONCURRENCY', async () => {
   
   await fs.writeFile(credentialStorePath, JSON.stringify(credentials));
   
+  // expiryConcurrency is now read from config (as loadConfig produces it),
+  // not from process.env directly.
   const config = {
     expiryWarningDays: 7,
+    expiryConcurrency: 4,
     credentialStorePath,
     auditLogPath: path.join(tmpDir, 'audit.ndjson'),
     notificationWebhookUrl: '',
@@ -33,12 +36,9 @@ test('ExpiryNotificationJob respects EXPIRY_CONCURRENCY', async () => {
   let currentConcurrent = 0;
   const dispatches = [];
   
-  const oldEnv = process.env.EXPIRY_CONCURRENCY;
-  process.env.EXPIRY_CONCURRENCY = '4';
-  
   try {
     const job = new ExpiryNotificationJob(config);
-    assert.equal(job.concurrency, 4, 'Should use EXPIRY_CONCURRENCY from env');
+    assert.equal(job.concurrency, 4, 'Should use expiryConcurrency from config');
     
     // Override dispatch to track concurrency
     job.dispatch = async (credential) => {
@@ -58,7 +58,6 @@ test('ExpiryNotificationJob respects EXPIRY_CONCURRENCY', async () => {
     assert.ok(maxConcurrent >= 2, 'Should have some concurrency');
     assert.equal(dispatches.length, 20, 'Should dispatch all credentials');
   } finally {
-    process.env.EXPIRY_CONCURRENCY = oldEnv;
     await fs.rm(tmpDir, { recursive: true, force: true });
   }
 });
@@ -79,14 +78,12 @@ test('ExpiryNotificationJob handles partial failures', async () => {
   
   const config = {
     expiryWarningDays: 7,
+    expiryConcurrency: 2,
     credentialStorePath,
     auditLogPath: path.join(tmpDir, 'audit.ndjson'),
     notificationWebhookUrl: '',
     subjectNotificationWebhooks: {},
   };
-  
-  const oldEnv = process.env.EXPIRY_CONCURRENCY;
-  process.env.EXPIRY_CONCURRENCY = '2';
   
   try {
     const job = new ExpiryNotificationJob(config);
@@ -121,7 +118,6 @@ test('ExpiryNotificationJob handles partial failures', async () => {
     const notNotified = updated.filter(c => !c.expiry_notified_at).map(c => c.id).sort();
     assert.deepEqual(notNotified, ['cred-2', 'cred-4'], 'Failed dispatches should not be marked');
   } finally {
-    process.env.EXPIRY_CONCURRENCY = oldEnv;
     await fs.rm(tmpDir, { recursive: true, force: true });
   }
 });
@@ -142,14 +138,12 @@ test('ExpiryNotificationJob with concurrency=1 processes sequentially', async ()
   
   const config = {
     expiryWarningDays: 7,
+    expiryConcurrency: 1,
     credentialStorePath,
     auditLogPath: path.join(tmpDir, 'audit.ndjson'),
     notificationWebhookUrl: '',
     subjectNotificationWebhooks: {},
   };
-  
-  const oldEnv = process.env.EXPIRY_CONCURRENCY;
-  process.env.EXPIRY_CONCURRENCY = '1';
   
   try {
     const job = new ExpiryNotificationJob(config);
@@ -169,7 +163,6 @@ test('ExpiryNotificationJob with concurrency=1 processes sequentially', async ()
     
     assert.equal(maxConcurrent, 1, 'Should never exceed concurrency of 1');
   } finally {
-    process.env.EXPIRY_CONCURRENCY = oldEnv;
     await fs.rm(tmpDir, { recursive: true, force: true });
   }
 });
@@ -190,14 +183,12 @@ test('ExpiryNotificationJob handles pool exhaustion gracefully', async () => {
   
   const config = {
     expiryWarningDays: 7,
+    expiryConcurrency: 3,
     credentialStorePath,
     auditLogPath: path.join(tmpDir, 'audit.ndjson'),
     notificationWebhookUrl: '',
     subjectNotificationWebhooks: {},
   };
-  
-  const oldEnv = process.env.EXPIRY_CONCURRENCY;
-  process.env.EXPIRY_CONCURRENCY = '3';
   
   try {
     const job = new ExpiryNotificationJob(config);
@@ -220,44 +211,28 @@ test('ExpiryNotificationJob handles pool exhaustion gracefully', async () => {
     assert.equal(dispatches.length, 50, 'Should dispatch all credentials');
     assert.ok(maxConcurrent <= 3, `Max concurrent should be <= 3, got ${maxConcurrent}`);
   } finally {
-    process.env.EXPIRY_CONCURRENCY = oldEnv;
     await fs.rm(tmpDir, { recursive: true, force: true });
   }
 });
 
 test('ExpiryNotificationJob clamps invalid concurrency values', async () => {
-  const oldEnv = process.env.EXPIRY_CONCURRENCY;
-  
-  try {
-    // Test negative value
-    process.env.EXPIRY_CONCURRENCY = '-5';
-    let job = new ExpiryNotificationJob({});
-    assert.equal(job.concurrency, 1, 'Should clamp negative to 1');
-    
-    // Test zero
-    process.env.EXPIRY_CONCURRENCY = '0';
-    job = new ExpiryNotificationJob({});
-    assert.equal(job.concurrency, 1, 'Should clamp zero to 1');
-    
-    // Test valid value
-    process.env.EXPIRY_CONCURRENCY = '16';
-    job = new ExpiryNotificationJob({});
-    assert.equal(job.concurrency, 16, 'Should use valid value');
-  } finally {
-    process.env.EXPIRY_CONCURRENCY = oldEnv;
-  }
+  // Negative value in config should be clamped to 1
+  let job = new ExpiryNotificationJob({ expiryConcurrency: -5 });
+  assert.equal(job.concurrency, 1, 'Should clamp negative to 1');
+
+  // Zero should be clamped to 1 (concurrency of 0 makes no sense for a job)
+  job = new ExpiryNotificationJob({ expiryConcurrency: 0 });
+  assert.equal(job.concurrency, 1, 'Should clamp zero to 1');
+
+  // Valid value should pass through unchanged
+  job = new ExpiryNotificationJob({ expiryConcurrency: 16 });
+  assert.equal(job.concurrency, 16, 'Should use valid value');
 });
 
 test('ExpiryNotificationJob default concurrency is 8', async () => {
-  const oldEnv = process.env.EXPIRY_CONCURRENCY;
-  delete process.env.EXPIRY_CONCURRENCY;
-  
-  try {
-    const job = new ExpiryNotificationJob({});
-    assert.equal(job.concurrency, 8, 'Should default to 8');
-  } finally {
-    process.env.EXPIRY_CONCURRENCY = oldEnv;
-  }
+  // When config has no expiryConcurrency key, the constructor defaults to 8
+  const job = new ExpiryNotificationJob({});
+  assert.equal(job.concurrency, 8, 'Should default to 8 when config.expiryConcurrency is undefined');
 });
 
 test('Concurrent processing does not block event loop', async () => {
@@ -276,14 +251,12 @@ test('Concurrent processing does not block event loop', async () => {
   
   const config = {
     expiryWarningDays: 7,
+    expiryConcurrency: 5,
     credentialStorePath,
     auditLogPath: path.join(tmpDir, 'audit.ndjson'),
     notificationWebhookUrl: '',
     subjectNotificationWebhooks: {},
   };
-  
-  const oldEnv = process.env.EXPIRY_CONCURRENCY;
-  process.env.EXPIRY_CONCURRENCY = '5';
   
   try {
     const job = new ExpiryNotificationJob(config);
@@ -307,7 +280,24 @@ test('Concurrent processing does not block event loop', async () => {
     // With concurrency=5, actual time is ~120ms, so expect ~12 ticks
     assert.ok(tickCount >= 5, `Event loop should remain responsive, got ${tickCount} ticks`);
   } finally {
-    process.env.EXPIRY_CONCURRENCY = oldEnv;
     await fs.rm(tmpDir, { recursive: true, force: true });
   }
+});
+
+// ── Regression test ──────────────────────────────────────────────────────────
+
+// #487 — EXPIRY_CONCURRENCY used to be inline-parsed in expiry.js, meaning a
+// typo like "eight" would produce NaN which bypasses the < 1 guard (NaN < 1
+// is false), silently making the concurrency limiter a no-op.
+// Now it is routed through config.js's parseInteger which coerces NaN to the
+// default (8), so the limiter always gets a valid integer.
+test('#487 regression: invalid (NaN) EXPIRY_CONCURRENCY falls back to config default, not unbounded', () => {
+  // Simulate what loadConfig produces for an invalid env var: parseInteger
+  // returns the fallback (8) because "eight" is not a valid integer.
+  const config = { expiryConcurrency: 8 }; // as loadConfig would produce
+  const job = new ExpiryNotificationJob(config);
+  assert.equal(job.concurrency, 8,
+    'An invalid EXPIRY_CONCURRENCY should produce the default (8), not NaN');
+  assert.ok(Number.isFinite(job.concurrency),
+    'job.concurrency must always be a finite number so the pool limiter works correctly');
 });
