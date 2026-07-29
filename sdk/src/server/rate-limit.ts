@@ -73,7 +73,11 @@ export class TokenBucketRateLimiter {
   ): { allowed: boolean; limit: number; remaining: number; resetAt: number; retryAfterMs: number } {
     const config = this.resolveConfig(key, rateClass);
     const now = this.now();
-    const bucket = this.buckets.get(key) ?? {
+    // Key includes the rate class so read and write budgets are tracked in
+    // separate buckets — a caller cannot consume read tokens to bypass the
+    // stricter write limit (Issue #478).
+    const bucketKey = `${key}:${rateClass}`;
+    const bucket = this.buckets.get(bucketKey) ?? {
       tokens: config.limit,
       lastRefillAt: now,
       config,
@@ -88,12 +92,26 @@ export class TokenBucketRateLimiter {
     }
     const allowed = bucket.tokens >= 1;
     if (allowed) bucket.tokens -= 1;
-    this.buckets.set(key, bucket);
+    this.buckets.set(bucketKey, bucket);
+    this.evictStale(now, config.windowMs);
     const remaining = Math.max(0, Math.floor(bucket.tokens));
-    // Reset is at the next full window boundary based on last refill.
-    const resetAt = Math.ceil((bucket.lastRefillAt + config.windowMs) / 1000);
-    const retryAfterMs = allowed ? 0 : Math.max(1, Math.ceil(config.windowMs / config.limit));
+    // Both resetAt and retryAfterMs are derived from the same "time until the
+    // next token is available" calculation so a client reading either value
+    // off a response gets consistent retry guidance.
+    const msPerToken = config.windowMs / config.limit;
+    const tokensNeeded = Math.max(0, 1 - bucket.tokens);
+    const timeUntilNextTokenMs = tokensNeeded > 0 ? Math.max(1, Math.ceil(tokensNeeded * msPerToken)) : 0;
+    const resetAt = Math.ceil((now + timeUntilNextTokenMs) / 1000);
+    const retryAfterMs = allowed ? 0 : timeUntilNextTokenMs;
     return { allowed, limit: config.limit, remaining, resetAt, retryAfterMs };
+  }
+
+  private evictStale(now: number, windowMs: number): void {
+    for (const [k, b] of this.buckets) {
+      if (now - b.lastRefillAt > windowMs) {
+        this.buckets.delete(k);
+      }
+    }
   }
 
   private resolveConfig(key: string, rateClass: RateClass): RateLimitConfig {

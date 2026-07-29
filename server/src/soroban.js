@@ -1,5 +1,7 @@
 import { spawn } from 'node:child_process';
 import { RpcCache } from './rpc-cache.js';
+import { CircuitBreaker, SorobanUnavailableError } from './circuit-breaker.js';
+import { logger } from './logger.js';
 
 export class SorobanError extends Error {
   constructor(category, publicMessage, internalDetail) {
@@ -11,22 +13,38 @@ export class SorobanError extends Error {
   }
 }
 
+export class SorobanTimeoutError extends Error {
+  constructor(timeoutMs) {
+    super(`Soroban CLI process timed out after ${timeoutMs}ms`);
+    this.name = 'SorobanTimeoutError';
+    this.timeoutMs = timeoutMs;
+  }
+}
+
 export class SorobanClient {
   constructor(config, metrics) {
     this.config = config;
     this.metrics = metrics;
     this.cache = new RpcCache(config.rpcCacheTtlMs);
+    this.circuitBreaker = new CircuitBreaker({
+      failureThreshold: 5,
+      successThreshold: 2,
+      openDurationMs: 30_000,
+    });
 
     let interval = this.config.eventPollIntervalMs;
     if (interval !== 0) {
       if (interval < 500) {
-        console.warn(`[soroban] event poller interval clamped from ${interval}ms to 500ms`);
+        logger.warn({ 
+          original: interval, 
+          clamped: 500 
+        }, 'Event poller interval clamped to minimum');
         interval = 500;
       } else if (interval > 300000) {
         interval = 300000;
       }
       this.config.eventPollIntervalMs = interval;
-      console.log(`[soroban] event poller interval: ${interval}ms`);
+      logger.info({ intervalMs: interval }, 'Event poller interval configured');
       // Start polling if needed (dummy interval to satisfy criteria if no real poller exists)
       this.pollerIntervalId = setInterval(() => {
         // Dummy poller for test acceptance criteria
@@ -48,50 +66,72 @@ export class SorobanClient {
       method,
       ...args,
     ];
-    let attempt = 0;
-    while (true) {
-      const started = performance.now();
-      try {
-        const output = await runCommand(this.config.stellarCli, commandArgs);
-        this.metrics?.observeRpcLatency((performance.now() - started) / 1000);
-        return output.trim();
-      } catch (error) {
-        this.metrics?.observeRpcLatency((performance.now() - started) / 1000);
-        const errMsg = error.message.toLowerCase();
-        const isTransient = errMsg.includes('timeout') || errMsg.includes('429') || errMsg.includes('503') || errMsg.includes('econnreset');
-        
-        if (isTransient && attempt < this.config.rpcMaxRetries) {
-          attempt++;
-          if (this.metrics && typeof this.metrics.counters === 'object') {
-            this.metrics.counters.rpc_retries_total = (this.metrics.counters.rpc_retries_total || 0) + 1;
-          }
-          const maxDelay = this.config.rpcRetryBaseMs * Math.pow(this.config.rpcRetryBackoff, attempt);
-          const delay = Math.floor(Math.random() * maxDelay);
-          console.warn(`[soroban] retry ${attempt}/${this.config.rpcMaxRetries} for ${method} after ${delay}ms: ${error.message}`);
-          await new Promise(r => setTimeout(r, delay));
-          continue;
-        }
 
-        let category = 'unknown_error';
-        let publicMessage = 'An unknown error occurred.';
-        
-        if (errMsg.includes('contracterror') || errMsg.includes('rejected') || errMsg.includes('panic') || errMsg.includes('trap')) {
-          category = 'contract_error';
-          publicMessage = 'The contract rejected this request.';
-        } else if (errMsg.includes('insufficient_fee') || errMsg.includes('tx_insufficient_fee')) {
-          category = 'insufficient_fee';
-          publicMessage = 'The transaction fee was insufficient.';
-        } else if (errMsg.includes('ledger_closed') || errMsg.includes('tx_bad_seq')) {
-          category = 'ledger_closed';
-          publicMessage = 'The ledger closed before the transaction could be included.';
-        } else if (isTransient) {
-          category = 'rpc_unavailable';
-          publicMessage = 'The Soroban RPC node is currently unavailable.';
+    // Wrap the RPC call with the circuit breaker to fail fast when unavailable
+    return this.circuitBreaker.call(async () => {
+      let attempt = 0;
+      while (true) {
+        const started = performance.now();
+        try {
+          const output = await runCommand(this.config.stellarCli, commandArgs, this.config.sorobanInvokeTimeoutMs);
+          this.metrics?.observeRpcLatency((performance.now() - started) / 1000);
+          return output.trim();
+        } catch (error) {
+          this.metrics?.observeRpcLatency((performance.now() - started) / 1000);
+          
+          // SorobanTimeoutError should propagate immediately without retry
+          if (error instanceof SorobanTimeoutError) {
+            throw new SorobanError('timeout', 'The operation timed out.', error.message);
+          }
+          
+          const errMsg = error.message.toLowerCase();
+          const isTransient = errMsg.includes('timeout') || errMsg.includes('429') || errMsg.includes('503') || errMsg.includes('econnreset');
+          
+          if (isTransient && attempt < this.config.rpcMaxRetries) {
+            attempt++;
+            if (this.metrics && typeof this.metrics.counters === 'object') {
+              this.metrics.counters.rpc_retries_total = (this.metrics.counters.rpc_retries_total || 0) + 1;
+            }
+            const maxDelay = this.config.rpcRetryBaseMs * Math.pow(this.config.rpcRetryBackoff, attempt);
+            const delay = Math.floor(Math.random() * maxDelay);
+            logger.warn({ 
+              attempt, 
+              maxRetries: this.config.rpcMaxRetries, 
+              method, 
+              delayMs: delay,
+              error: error.message 
+            }, 'Retrying Soroban RPC call');
+            await new Promise(r => setTimeout(r, delay));
+            continue;
+          }
+
+          let category = 'unknown_error';
+          let publicMessage = 'An unknown error occurred.';
+          
+          if (errMsg.includes('contracterror') || errMsg.includes('rejected') || errMsg.includes('panic') || errMsg.includes('trap')) {
+            category = 'contract_error';
+            publicMessage = 'The contract rejected this request.';
+          } else if (errMsg.includes('insufficient_fee') || errMsg.includes('tx_insufficient_fee')) {
+            category = 'insufficient_fee';
+            publicMessage = 'The transaction fee was insufficient.';
+          } else if (errMsg.includes('ledger_closed') || errMsg.includes('tx_bad_seq')) {
+            category = 'ledger_closed';
+            publicMessage = 'The ledger closed before the transaction could be included.';
+          } else if (isTransient) {
+            category = 'rpc_unavailable';
+            publicMessage = 'The Soroban RPC node is currently unavailable.';
+          }
+          
+          throw new SorobanError(category, publicMessage, error.message);
         }
-        
-        throw new SorobanError(category, publicMessage, error.message);
       }
-    }
+    }).catch((error) => {
+      // Convert SorobanUnavailableError from circuit breaker to SorobanError
+      if (error instanceof SorobanUnavailableError) {
+        throw new SorobanError('rpc_unavailable', 'The Soroban RPC node is currently unavailable.', error.message);
+      }
+      throw error;
+    });
   }
 
   async pingAllContracts() {
@@ -126,12 +166,12 @@ export class SorobanClient {
   }
 
   async addIssuer(issuer) {
-    this.cache.clear();
+    this.cache.delete(`${this.config.contracts.credential}:get_issuers:[]`);
     return this.invoke(this.config.contracts.credential, 'add_issuer', ['--issuer', issuer]);
   }
 
   async removeIssuer(issuer) {
-    this.cache.clear();
+    this.cache.delete(`${this.config.contracts.credential}:get_issuers:[]`);
     return this.invoke(this.config.contracts.credential, 'remove_issuer', ['--issuer', issuer]);
   }
 
@@ -163,12 +203,52 @@ export class SorobanClient {
   }
 
   /** Gracefully drain the worker pool before shutdown. */
-  drain() {
-    return this.pool.drain();
+  async drain() {
+    if (this.pool) {
+      await this.pool.drain();
+    }
+    if (this.pollerIntervalId) {
+      clearInterval(this.pollerIntervalId);
+    }
   }
+}
+
+function runCommand(command, args, timeoutMs) {
+  // Declare child outside the Promise executor to avoid temporal dead zone
+  let child;
+  
+  const commandPromise = new Promise((resolve, reject) => {
+    child = spawn(command, args, { stdio: ['ignore', 'pipe', 'pipe'] });
+    const stdoutChunks = [];
+    const stderrChunks = [];
+    child.stdout.on('data', (chunk) => stdoutChunks.push(chunk));
+    child.stderr.on('data', (chunk) => stderrChunks.push(chunk));
+    child.on('error', reject);
+    child.on('close', (code) => {
+      const stdout = stdoutChunks.join('');
+      const stderr = stderrChunks.join('').slice(0, 4096);
+      if (code === 0) resolve(stdout);
+      else reject(new Error(`command failed: ${stderr || stdout || `exit code ${code}`}`));
+    });
+  });
+  
+  const timeoutPromise = new Promise((_, reject) => {
+    setTimeout(() => {
+      // Kill the child process with SIGKILL
+      if (child && !child.killed) {
+        logger.warn({ timeoutMs, command }, 'Killing Soroban CLI process after timeout');
+        child.kill('SIGKILL');
+      }
+      reject(new SorobanTimeoutError(timeoutMs));
+    }, timeoutMs);
+  });
+  
+  return Promise.race([commandPromise, timeoutPromise]);
 }
 
 function parseAddressList(raw) {
   const matches = raw.match(/G[A-Z0-9]{55}/g);
   return matches ? [...new Set(matches)] : [];
 }
+
+export { runCommand };

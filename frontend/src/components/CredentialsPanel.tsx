@@ -19,6 +19,7 @@ type VerifyState =
   | "invalid";
 
 type FilterType = "All" | CredentialType;
+type ExpiryFilterType = "All" | "Active" | "Expired";
 type CredentialStatus = "active" | "expired" | "revoked";
 type Credential = {
   id: string;
@@ -103,6 +104,7 @@ function getStatusSortRank(credential: Credential): number {
 // TODO: integrate SDK — replace with CredentialClient.getCredentialsBySubject() (see issue #226)
 
 const FILTER_OPTIONS: FilterType[] = ["All", "Kyc", "Reputation", "Achievement", "Custom"];
+const EXPIRY_FILTER_OPTIONS: ExpiryFilterType[] = ["All", "Active", "Expired"];
 
 const CREDENTIAL_TYPE_ICONS: Record<CredentialType, string> = {
   Kyc: "🆔",
@@ -114,6 +116,86 @@ const CREDENTIAL_TYPE_ICONS: Record<CredentialType, string> = {
 function countByType(creds: Credential[], type: FilterType): number {
   if (type === "All") return creds.length;
   return creds.filter((c) => c.credentialType === type).length;
+}
+
+function countByExpiry(creds: Credential[], filter: ExpiryFilterType): number {
+  if (filter === "All") return creds.length;
+  if (filter === "Active") return creds.filter((c) => !isExpired(c.expiresAt) && !c.revoked).length;
+  if (filter === "Expired") return creds.filter((c) => isExpired(c.expiresAt) || c.revoked).length;
+  return creds.length;
+}
+
+function CredentialEmptyState({ searchedAddress }: { searchedAddress: string | null }) {
+  return (
+    <div
+      role="status"
+      aria-live="polite"
+      style={{
+        display: "flex",
+        flexDirection: "column",
+        alignItems: "center",
+        justifyContent: "center",
+        gap: "0.75rem",
+        minHeight: "12rem",
+        padding: "2.5rem 1rem",
+        textAlign: "center",
+        color: "var(--text-muted)",
+      }}
+    >
+      <svg
+        width="56"
+        height="56"
+        viewBox="0 0 56 56"
+        fill="none"
+        aria-hidden="true"
+      >
+        <rect
+          x="10"
+          y="8"
+          width="36"
+          height="40"
+          rx="8"
+          fill="var(--card-bg-accent)"
+          stroke="var(--border-input)"
+          strokeWidth="2"
+        />
+        <path
+          d="M19 23h18M19 31h12"
+          stroke="var(--accent-light)"
+          strokeWidth="2.5"
+          strokeLinecap="round"
+        />
+        <circle
+          cx="38"
+          cy="38"
+          r="7"
+          fill="var(--card-bg)"
+          stroke="var(--accent-light)"
+          strokeWidth="2"
+        />
+        <path
+          d="m35.5 38 1.8 1.8 3.7-4"
+          stroke="var(--accent-light)"
+          strokeWidth="2"
+          strokeLinecap="round"
+          strokeLinejoin="round"
+        />
+      </svg>
+      <div>
+        <h3 style={{ margin: "0 0 0.35rem", color: "var(--text)", fontSize: "1rem" }}>
+          No credentials yet
+        </h3>
+        <p style={{ margin: 0, fontSize: "0.9rem", lineHeight: 1.5 }}>
+          Credentials issued to your DID will appear here.
+        </p>
+        {searchedAddress && (
+          <p style={{ margin: "0.35rem 0 0", fontSize: "0.8rem", lineHeight: 1.4 }}>
+            Searched account {searchedAddress.slice(0, 6)}...{searchedAddress.slice(-4)}
+          </p>
+        )}
+      </div>
+    </div>
+  );
 }
 
 type CredentialState =
@@ -158,6 +240,7 @@ export default function CredentialsPanel({ verifyId }: { verifyId?: string | nul
   const [issueErrors, setIssueErrors] = useState<Record<string, string>>({});
 
   const [activeFilter, setActiveFilter] = useState<FilterType>("All");
+  const [activeExpiryFilter, setActiveExpiryFilter] = useState<ExpiryFilterType>("All");
   const [isIssuer, setIsIssuer] = useState(false);
   const [checkingIssuer, setCheckingIssuer] = useState(false);
 
@@ -290,7 +373,14 @@ export default function CredentialsPanel({ verifyId }: { verifyId?: string | nul
       ? displayCredentials
       : displayCredentials.filter((c) => c.credentialType === activeFilter);
 
-  const sortedCredentials = [...filteredCredentials].sort(
+  const filteredByExpiry = filteredCredentials.filter((c) => {
+    if (activeExpiryFilter === "All") return true;
+    if (activeExpiryFilter === "Active") return !isExpired(c.expiresAt) && !c.revoked;
+    if (activeExpiryFilter === "Expired") return isExpired(c.expiresAt) || c.revoked;
+    return true;
+  });
+
+  const sortedCredentials = [...filteredByExpiry].sort(
     (a, b) => getStatusSortRank(a) - getStatusSortRank(b)
   );
 
@@ -418,18 +508,52 @@ export default function CredentialsPanel({ verifyId }: { verifyId?: string | nul
           })}
         </div>
 
+        <div style={{ display: "flex", gap: "0.5rem", flexWrap: "wrap", marginBottom: "1rem" }}>
+          {EXPIRY_FILTER_OPTIONS.map((status) => {
+            const count = countByExpiry(displayCredentials, status);
+            const isActive = activeExpiryFilter === status;
+            return (
+              <button
+                key={status}
+                onClick={() => setActiveExpiryFilter(status)}
+                style={{
+                  padding: "0.3rem 0.75rem",
+                  borderRadius: "999px",
+                  border: isActive ? "2px solid var(--accent-light)" : "2px solid var(--border-input)",
+                  background: isActive ? "var(--card-bg-accent)" : "transparent",
+                  color: isActive ? "var(--accent-light)" : "var(--text-muted)",
+                  cursor: "pointer",
+                  fontSize: "0.85rem",
+                  fontWeight: isActive ? 600 : 400,
+                }}
+                aria-pressed={isActive}
+                aria-label={`Filter by ${status} credentials`}
+              >
+                {status}{" "}
+                <span
+                  style={{
+                    background: isActive ? "var(--filter-badge-active-bg)" : "var(--border-input)",
+                    color: isActive ? "var(--filter-badge-active-text)" : "var(--text-muted)",
+                    borderRadius: "999px",
+                    padding: "0 0.4rem",
+                    fontSize: "0.75rem",
+                    marginLeft: "0.25rem",
+                  }}
+                >
+                  {count}
+                </span>
+              </button>
+            );
+          })}
+        </div>
+
         {fetching ? (
-          <SkeletonCard rows={3} />
+          <SkeletonCard variant="credential" />
         ) : fetchedCredentials !== null && fetchedCredentials.length === 0 ? (
-          <div style={{ textAlign: "center", padding: "2rem 1rem", color: "var(--text-muted)" }}>
-            <div style={{ fontSize: "2rem", marginBottom: "0.5rem" }}>🪪</div>
-            <p style={{ margin: 0, fontSize: "0.9rem" }}>
-              No credentials found for this address.
-            </p>
-          </div>
-        ) : filteredCredentials.length === 0 ? (
+          <CredentialEmptyState searchedAddress={searchedAddress} />
+        ) : sortedCredentials.length === 0 ? (
           <p style={{ color: "var(--text-muted)", fontSize: "0.85rem" }}>
-            No {activeFilter} credentials found.
+            No credentials match the selected filters.
           </p>
         ) : (
           <ul style={{ listStyle: "none", padding: 0, margin: 0, display: "flex", flexDirection: "column", gap: "0.5rem" }}>
@@ -547,7 +671,7 @@ export default function CredentialsPanel({ verifyId }: { verifyId?: string | nul
         <button onClick={() => void handleVerify()} disabled={verifying || !credId}>
           {verifying ? "Verifying…" : "Verify"}
         </button>
-        {verifying && <SkeletonCard rows={2} />}
+        {verifying && <SkeletonCard variant="credential" />}
         {!verifying && verifyState !== "idle" && (
           <div style={{ marginTop: "1rem" }}>
             {verifyState === "valid" && (

@@ -1,9 +1,39 @@
 import { readCredentials, upsertCredential, writeCredentials } from './storage.js';
+import { logger } from './logger.js';
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 
 let _indexedCredentials = null;
 let _expiryIndex = null;
+
+/**
+ * Create a bounded concurrency limiter that processes tasks with a maximum
+ * number of concurrent executions.
+ * 
+ * @param {number} concurrency - Maximum number of concurrent tasks
+ * @returns {Function} Async function that wraps a task with concurrency control
+ */
+function createConcurrencyPool(concurrency) {
+  let running = 0;
+  const queue = [];
+  
+  async function run(fn) {
+    while (running >= concurrency) {
+      await new Promise(resolve => queue.push(resolve));
+    }
+    
+    running++;
+    try {
+      return await fn();
+    } finally {
+      running--;
+      const next = queue.shift();
+      if (next) next();
+    }
+  }
+  
+  return run;
+}
 
 /**
  * Build a sorted index of credentials that have an `expires_at` value, ordered
@@ -58,15 +88,40 @@ export function findExpiringCredentials(credentials, { windowDays, now = new Dat
     .filter((c) => includeNotified || !c.expiry_notified_at);
 }
 
+/**
+ * Cursor-based pagination over an array sorted by `id`.
+ * The cursor is the last-seen `id`; pass null/undefined for the first page.
+ */
+export function paginateCursor(items, { limit = 50, cursor = null } = {}) {
+  const safeLimit = Math.min(200, Math.max(1, Number.parseInt(limit, 10) || 50));
+  const startIndex = cursor
+    ? items.findIndex((item) => item.id === cursor) + 1
+    : 0;
+  const page = items.slice(startIndex, startIndex + safeLimit);
+  const nextCursor = page.length === safeLimit && startIndex + safeLimit < items.length
+    ? page[page.length - 1].id
+    : null;
+  return { items: page, nextCursor };
+}
+
 export function paginate(items, { page = 1, pageSize = 50 } = {}) {
   const safePage = Math.max(1, Number.parseInt(page, 10) || 1);
   const safePageSize = Math.min(200, Math.max(1, Number.parseInt(pageSize, 10) || 50));
+  const totalItems = items.length;
+  const totalPages = Math.ceil(totalItems / safePageSize) || 1;
+  // Normalise to 0-based index internally so that a 1-indexed `page` param
+  // never causes the final item to appear on a phantom extra page.
   const start = (safePage - 1) * safePageSize;
+  // Clamp end to the actual array length to prevent duplicates on the last page.
+  const end = Math.min(start + safePageSize, totalItems);
+  const hasNextPage = end < totalItems;
   return {
     page: safePage,
     pageSize: safePageSize,
-    total: items.length,
-    items: items.slice(start, start + safePageSize),
+    totalItems,
+    totalPages,
+    hasNextPage,
+    items: start >= totalItems ? [] : items.slice(start, end),
   };
 }
 
@@ -76,13 +131,45 @@ export class ExpiryNotificationJob {
     this.soroban = soroban;
     this.timer = null;
     this.nextLedger = Number.parseInt(process.env.EXPIRY_EVENTS_START_LEDGER ?? '0', 10);
+
+    // Use the validated value from config rather than re-parsing the env var
+    // inline. config.expiryConcurrency has already been through parseInteger's
+    // NaN/< 1 guards, so we only need to enforce a floor of 1 here.
+    this.concurrency = Math.max(1, config.expiryConcurrency ?? 8);
+    
+    logger.info({ concurrency: this.concurrency }, 'Expiry notification job concurrency configured');
+  }
+
+  /**
+   * Load the persisted watermark on startup.
+   * If persisted watermark exists, it takes precedence over EXPIRY_EVENTS_START_LEDGER.
+   * 
+   * @returns {Promise<void>}
+   */
+  async loadWatermark() {
+    const { readExpiryWatermark } = await import('./storage.js');
+    const persistedLedger = await readExpiryWatermark(this.config);
+    if (persistedLedger !== null) {
+      logger.info({ persistedLedger, previousDefault: this.nextLedger }, 'Loaded persisted expiry watermark');
+      this.nextLedger = persistedLedger;
+    }
+  }
+
+  /**
+   * Persist the current watermark to storage.
+   * 
+   * @returns {Promise<void>}
+   */
+  async persistWatermark() {
+    const { writeExpiryWatermark } = await import('./storage.js');
+    await writeExpiryWatermark(this.config, this.nextLedger);
   }
 
   start() {
     if (this.timer) return;
-    this.runOnce().catch((error) => console.error('expiry job failed', error));
+    this.runOnce().catch((error) => logger.error({ error: error.message, stack: error.stack }, 'Expiry job failed'));
     this.timer = setInterval(() => {
-      this.runOnce().catch((error) => console.error('expiry job failed', error));
+      this.runOnce().catch((error) => logger.error({ error: error.message, stack: error.stack }, 'Expiry job failed'));
     }, this.config.expiryJobIntervalMs);
   }
 
@@ -95,12 +182,66 @@ export class ExpiryNotificationJob {
     let credentials = await readCredentials(this.config);
     credentials = await this.indexCredentialEvents(credentials);
     const expiring = findExpiringCredentials(credentials, { windowDays: this.config.expiryWarningDays });
-    for (const credential of expiring) {
-      await this.dispatch(credential);
-      credentials = upsertCredential(credentials, { ...credential, expiry_notified_at: new Date().toISOString() });
+    
+    // Always persist credentials, even if none are expiring
+    if (expiring.length === 0) {
+      await writeCredentials(this.config, credentials);
+      await this.persistWatermark();
+      return 0;
     }
-    await writeCredentials(this.config, credentials);
-    return expiring.length;
+    
+    logger.info({ count: expiring.length, concurrency: this.concurrency }, 'Processing expiring credentials');
+    
+    // Create bounded concurrency pool
+    const pool = createConcurrencyPool(this.concurrency);
+    
+    // Process credentials concurrently with bounded parallelism
+    const results = await Promise.allSettled(
+      expiring.map(credential => 
+        pool(async () => {
+          try {
+            await this.dispatch(credential);
+            return { credential, success: true };
+          } catch (error) {
+            logger.error({ 
+              credentialId: credential.id,
+              error: error.message,
+              stack: error.stack 
+            }, 'Failed to dispatch expiry notification');
+            return { credential, success: false, error };
+          }
+        })
+      )
+    );
+    
+    // Update credentials with notification timestamps for successful dispatches
+    let updated = credentials;
+    let successCount = 0;
+    let failureCount = 0;
+    
+    for (const result of results) {
+      if (result.status === 'fulfilled' && result.value.success) {
+        const { credential } = result.value;
+        updated = upsertCredential(updated, { 
+          ...credential, 
+          expiry_notified_at: new Date().toISOString() 
+        });
+        successCount++;
+      } else {
+        failureCount++;
+      }
+    }
+    
+    await writeCredentials(this.config, updated);
+    await this.persistWatermark();
+    
+    logger.info({ 
+      total: expiring.length,
+      success: successCount,
+      failed: failureCount 
+    }, 'Completed expiry notification processing');
+    
+    return successCount;
   }
 
   async indexCredentialEvents(credentials) {
@@ -135,16 +276,44 @@ export class ExpiryNotificationJob {
   }
 }
 
+/**
+ * Classify events based on the contract's actual topic structure.
+ * Credential-issued events from credential-manager have topics: ["CRED", "issued"]
+ * where CRED is a Symbol short-code (represented as a string in the topic array).
+ * 
+ * @param {Object} event - Event object from Soroban RPC
+ * @returns {Object|null} Extracted credential data or null if not a credential-issued event
+ */
 export function credentialFromEvent(event) {
-  const text = JSON.stringify(event).toLowerCase();
-  if (!text.includes('cred') || !text.includes('issued')) return null;
+  // Soroban contract events have a 'topic' array with Symbol values
+  // Credential-issued events have topics: (CRED, symbol_short!("issued"))
+  // In the event structure, this becomes something like ["CRED", "issued"] or similar
+  if (!event || typeof event !== 'object') return null;
+  
+  const topic = event.topic;
+  if (!Array.isArray(topic) || topic.length < 2) return null;
+  
+  // Check if this is a credential-issued event by examining the topic
+  // The contract uses (CRED, symbol_short!("issued")) where CRED = symbol_short!("CRED")
+  // After deserialization, the topic array should contain these symbols
+  // Both should be present and in order
+  const topicStr = JSON.stringify(topic).toLowerCase();
+  const isCreditIssuedTopic = topicStr.includes('cred') && topicStr.includes('issued');
+  
+  if (!isCreditIssuedTopic) return null;
+  
+  // Extract credential data from the event value
   const value = event.value ?? event.data ?? event;
-  if (value && typeof value === 'object' && !Array.isArray(value)) {
-    const id = value.id ?? value.credential_id;
-    const subject = value.subject;
-    const issuer = value.issuer;
-    const expires_at = Number(value.expires_at);
-    if (id && subject && issuer && expires_at) return { id, subject, issuer, expires_at, source: 'event' };
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
+  
+  const id = value.id ?? value.credential_id;
+  const subject = value.subject;
+  const issuer = value.issuer;
+  const expires_at = Number(value.expires_at);
+  
+  if (id && subject && issuer && Number.isFinite(expires_at)) {
+    return { id, subject, issuer, expires_at, source: 'event' };
   }
+  
   return null;
 }

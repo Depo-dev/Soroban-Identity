@@ -112,7 +112,7 @@ describe("createApiKeyAuthMiddleware", () => {
     expect((out.body as any).error.code).toBe("UNAUTHORIZED");
   });
 
-  it("rejects when requireScope is not granted", async () => {
+  it("rejects with 403 (not 401) when requireScope is not granted (#506)", async () => {
     const store = new InMemoryApiKeyStore();
     const { rawKey } = await issueApiKey(store, {
       owner: "u",
@@ -124,7 +124,41 @@ describe("createApiKeyAuthMiddleware", () => {
     const req: any = { headers: { authorization: `Bearer ${rawKey}` } };
     const { res, out } = captureRes();
     await middleware(req, res, () => {});
-    expect(out.status).toBe(401);
+    expect(out.status).toBe(403);
     expect((out.body as any).error.message).toMatch(/scope admin/);
+  });
+
+  it("distinguishes 401 (no/invalid credentials) from 403 (under-scoped) (#506)", async () => {
+    const store = new InMemoryApiKeyStore();
+    const { rawKey } = await issueApiKey(store, {
+      owner: "u",
+      scopes: ["read"],
+      idFn: () => "k1",
+      randomFn: () => Buffer.alloc(32, 1),
+    });
+    const middleware = createApiKeyAuthMiddleware({ store, requireScope: "admin" });
+
+    // No credentials at all → 401.
+    const noAuth = captureRes();
+    await middleware({ headers: {} } as any, noAuth.res, () => {});
+    expect(noAuth.out.status).toBe(401);
+
+    // Invalid credentials → 401.
+    const badAuth = captureRes();
+    await middleware(
+      { headers: { authorization: "Bearer sk_unknown" } } as any,
+      badAuth.res,
+      () => {},
+    );
+    expect(badAuth.out.status).toBe(401);
+
+    // Valid, authenticated, but under-scoped → 403.
+    const underScoped = captureRes();
+    await middleware(
+      { headers: { authorization: `Bearer ${rawKey}` } } as any,
+      underScoped.res,
+      () => {},
+    );
+    expect(underScoped.out.status).toBe(403);
   });
 });

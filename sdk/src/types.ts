@@ -45,11 +45,28 @@ export interface DidDocument {
   services: ServiceEndpoint[];
 }
 
+const VALID_CREDENTIAL_TYPES = ["Kyc", "Reputation", "Achievement", "Custom"] as const;
+
 /**
  * Credential category recognised by the credential-manager contract.
  * `Custom` is the catch-all for application-defined types.
  */
-export type CredentialType = "Kyc" | "Reputation" | "Achievement" | "Custom";
+export type CredentialType = (typeof VALID_CREDENTIAL_TYPES)[number];
+
+export class UnknownCredentialTypeError extends Error {
+  constructor(value: unknown) {
+    super(`UnknownCredentialTypeError: unexpected credential type "${String(value)}"`);
+    this.name = "UnknownCredentialTypeError";
+  }
+}
+
+export function assertCredentialType(value: unknown): CredentialType {
+  if (typeof value === "string" && VALID_CREDENTIAL_TYPES.includes(value as CredentialType)) {
+    return value as CredentialType;
+  }
+
+  throw new UnknownCredentialTypeError(value);
+}
 
 /**
  * On-chain credential record returned by
@@ -119,6 +136,20 @@ export interface SorobanIdentityLogger {
   info?(message: string, meta?: Record<string, unknown>): void;
   warn?(message: string, meta?: Record<string, unknown>): void;
   error?(message: string, meta?: Record<string, unknown>): void;
+}
+
+export interface ReputationRecord {
+  subject: string;
+  score: number;
+  reporterCount: number;
+  updatedAt: number;
+}
+
+export interface ScoreHistoryEntry {
+  reporter: string;
+  delta: number;
+  reason: string;
+  submittedAt: number;
 }
 
 export interface SorobanIdentityConfig {
@@ -291,5 +322,21 @@ export function validateConfig(
   }
   if (!StrKey.isValidContract(contractId)) {
     throw new Error(`${options.contractIdField} is not a valid contract ID`);
+  }
+}
+
+export interface FeeEstimate {
+  /** Base network fee in stroops. */
+  baseFee: number;
+  /** Soroban resource fee in stroops. */
+  resourceFee: number;
+  /** Total fee (baseFee + resourceFee) in stroops. */
+  totalFee: number;
+}
+
+export class SimulationError extends Error {
+  constructor(message: string, public readonly raw?: unknown) {
+    super(message);
+    this.name = 'SimulationError';
   }
 }

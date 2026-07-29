@@ -21,6 +21,7 @@ export interface ContractEvent {
   ledger: number;
   /** Transaction hash of the transaction that produced this event. */
   txHash: string;
+  eventId: string;
 }
 
 /** Options for a one-shot historical event query via {@link getEvents}. */
@@ -94,10 +95,149 @@ function parseRawEvent(event: SorobanRpc.Api.EventResponse): ContractEvent | nul
         ? (scValToNative(event.value) as Record<string, unknown>)
         : {};
 
-    return { type: event.type, contractId, topic, value, ledger: event.ledger, txHash: event.txHash };
+    return {
+      type: event.type,
+      contractId,
+      topic,
+      value,
+      ledger: event.ledger,
+      txHash: event.txHash,
+      eventId: event.id,
+    };
   } catch {
     return null;
   }
+}
+
+const MAX_RECONNECT_RETRIES = 5;
+
+/** Max entries retained in a dedup set before oldest entries are evicted. */
+const MAX_SEEN_IDS = 10_000;
+
+/**
+ * Insertion-ordered dedup set that evicts its oldest entries once it grows
+ * past `maxSize`, so long-lived listeners don't leak memory unboundedly.
+ */
+class BoundedSeenSet {
+  private ids = new Set<string>();
+
+  constructor(private readonly maxSize = MAX_SEEN_IDS) {}
+
+  has(id: string): boolean {
+    return this.ids.has(id);
+  }
+
+  add(id: string): void {
+    if (this.ids.size >= this.maxSize) {
+      const oldest = this.ids.values().next().value;
+      if (oldest !== undefined) this.ids.delete(oldest);
+    }
+    this.ids.add(id);
+  }
+}
+
+export interface SubscribeOptions {
+  /** Polling interval in milliseconds. Defaults to 5000. */
+  pollIntervalMs?: number;
+}
+
+/**
+ * Subscribe to real-time contract events with automatic reconnect.
+ *
+ * Manages an internal polling loop, calls `handler(event)` for each new
+ * matching event, and reconnects automatically after transient network
+ * failures up to {@link MAX_RECONNECT_RETRIES} consecutive attempts.
+ *
+ * Duplicate events across poll cycles are suppressed via a seen-eventId set.
+ *
+ * @param rpcUrl     Soroban RPC endpoint URL.
+ * @param contractId Contract whose events to subscribe to.
+ * @param filter     Optional topic / contract-ID filter.
+ * @param handler    Called once per new matching event.
+ * @param options    Subscription options (pollIntervalMs).
+ * @returns An `unsubscribe()` function that stops the polling loop.
+ *
+ * @example
+ * ```ts
+ * const unsubscribe = subscribeToEvents(
+ *   rpcUrl, contractId, { topic: ['credential', 'issued'] },
+ *   (event) => console.log(event),
+ *   { pollIntervalMs: 3000 },
+ * );
+ * // later…
+ * unsubscribe();
+ * ```
+ */
+export function subscribeToEvents(
+  rpcUrl: string,
+  contractId: string,
+  filter: EventFilter | undefined,
+  handler: (event: ContractEvent) => void,
+  options: SubscribeOptions = {},
+): () => void {
+  const { pollIntervalMs = 5000 } = options;
+  const server = new SorobanRpc.Server(rpcUrl);
+  const seenEventIds = new BoundedSeenSet();
+  let lastLedger = 0;
+  let reconnectAttempts = 0;
+  let stopped = false;
+  let timerId: ReturnType<typeof setTimeout> | undefined;
+
+  const poll = async () => {
+    if (stopped) return;
+    try {
+      const response = await server.getEvents({
+        startLedger: lastLedger || undefined,
+        filters: [
+          {
+            type: "contract",
+            contractIds: [contractId],
+            topics: buildTopicsFilter(filter),
+          },
+        ],
+        limit: 100,
+      });
+
+      const events = (response.events ?? [])
+        .map(parseRawEvent)
+        .filter((e): e is ContractEvent => e !== null)
+        .filter((e) => !seenEventIds.has(e.eventId));
+
+      for (const event of events) {
+        seenEventIds.add(event.eventId);
+        handler(event);
+      }
+
+      if (events.length > 0) {
+        lastLedger = Math.max(...events.map((e) => e.ledger)) + 1;
+      }
+
+      reconnectAttempts = 0;
+    } catch (err) {
+      if (stopped) return;
+      reconnectAttempts++;
+      if (reconnectAttempts > MAX_RECONNECT_RETRIES) {
+        console.error("subscribeToEvents: max reconnect retries exceeded, stopping.", err);
+        stopped = true;
+        return;
+      }
+      console.warn(`subscribeToEvents: transient error (attempt ${reconnectAttempts}/${MAX_RECONNECT_RETRIES}), reconnecting...`, err);
+    }
+
+    if (!stopped) {
+      timerId = setTimeout(poll, pollIntervalMs);
+    }
+  };
+
+  timerId = setTimeout(poll, 0);
+
+  return () => {
+    stopped = true;
+    if (timerId !== undefined) {
+      clearTimeout(timerId);
+      timerId = undefined;
+    }
+  };
 }
 
 /**
@@ -124,6 +264,7 @@ export class SorobanEventListener {
   private isRunning = false;
   private intervalId?: ReturnType<typeof setInterval>;
   private lastLedger = 0;
+  private seenEventIds = new BoundedSeenSet();
 
   /**
    * @param rpcUrl     Soroban RPC endpoint URL.
@@ -160,11 +301,15 @@ export class SorobanEventListener {
         });
 
         if (events.events && events.events.length > 0) {
-          const contractEvents = events.events
+          const contractEvents = (events.events
             .map((e) => this.parseEvent(e))
-            .filter((e) => e !== null) as ContractEvent[];
+            .filter((e) => e !== null) as ContractEvent[])
+            .filter((e) => !this.seenEventIds.has(e.eventId));
 
           if (contractEvents.length > 0) {
+            for (const e of contractEvents) {
+              this.seenEventIds.add(e.eventId);
+            }
             callback(contractEvents);
             this.lastLedger =
               Math.max(...contractEvents.map((e) => e.ledger)) + 1;

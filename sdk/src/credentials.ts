@@ -5,9 +5,20 @@ import {
   TransactionBuilder,
   BASE_FEE,
   Keypair,
-  nativeToScVal,
-  scValToNative,
 } from "@stellar/stellar-sdk";
+import type { Credential, CredentialType, SorobanIdentityConfig, VerifyResult } from "./types";
+import { executeTransaction, TxOptions } from "./transaction";
+import {
+  encodeAddress,
+  encodeMap,
+  encodeBytes,
+  encodeSymbol,
+  encodeU64,
+  decodeCredential,
+  decodeCredentialId,
+  decodeCredentialIdList,
+  decodeBoolean,
+} from "./codec";
 import { createHash } from "node:crypto";
 import type {
   CallOptions,
@@ -205,6 +216,40 @@ export class CredentialClient extends BaseClient {
   }
 
   /**
+   * Register a trusted issuer and their Ed25519 public key (admin only).
+   */
+  async addIssuer(
+    adminKeypair: Keypair,
+    issuerAddress: string,
+    issuerPublicKeyBytes: Buffer | Uint8Array
+  ): Promise<void> {
+    const account = await this.server.getAccount(adminKeypair.publicKey());
+
+    const tx = new TransactionBuilder(account, {
+      fee: BASE_FEE,
+      networkPassphrase: this.config.networkPassphrase,
+    })
+      .addOperation(
+        this.contract.call(
+          "add_issuer",
+          nativeToScVal(issuerAddress, { type: "address" }),
+          nativeToScVal(Buffer.from(issuerPublicKeyBytes), { type: "bytes" })
+        )
+      )
+      .setTimeout(30)
+      .build();
+
+    const prepared = await this.server.prepareTransaction(tx);
+    prepared.sign(adminKeypair);
+
+    const result = await this.server.sendTransaction(prepared);
+    if (result.status !== "PENDING") {
+      throw new Error(`Transaction failed: ${result.status}`);
+    }
+    await this.waitForConfirmation(result.hash);
+  }
+
+  /**
    * Issue a credential to a subject. Caller must be a registered issuer.
    *
    * Builds, signs, and submits an `issue_credential` call to the
@@ -240,6 +285,29 @@ export class CredentialClient extends BaseClient {
     subjectAddress: string,
     credentialType: CredentialType,
     claims: Record<string, string>,
+    expiresAt = 0,
+    txOptions?: TxOptions
+  ): Promise<string> {
+    const account = await this.server.getAccount(issuerKeypair.publicKey());
+
+    // Build canonical signed message matching on-chain build_signed_message
+    let msgBuf = Buffer.concat([
+      Buffer.from(issuerKeypair.publicKey(), "utf8"),
+      Buffer.from(subjectAddress, "utf8"),
+    ]);
+    const sortedKeys = Object.keys(claims).sort();
+    for (const k of sortedKeys) {
+      msgBuf = Buffer.concat([
+        msgBuf,
+        Buffer.from(k, "utf8"),
+        Buffer.from(claims[k], "utf8"),
+      ]);
+    }
+
+    const signature = issuerKeypair.sign(msgBuf);
+    const signature = issuerKeypair.sign(
+      Buffer.from(JSON.stringify({ subjectAddress, claims }))
+    );
     claimsHashHex: string,
     expiresAt = 0,
     options?: CallOptions & { nonce?: string; schemaId?: string },
@@ -384,6 +452,13 @@ export class CredentialClient extends BaseClient {
     })
       .addOperation(
         this.contract.call(
+          "issue_credential",
+          encodeAddress(issuerKeypair.publicKey()),
+          encodeAddress(subjectAddress),
+          encodeSymbol(credentialType),
+          encodeMap(claims),
+          encodeBytes(Buffer.from(signature)),
+          encodeU64(expiresAt)
           'revoke_credential',
           ...buildRevokeCredentialArgs({ issuer: issuerKeypair.publicKey(), credentialId: idBytes })
         )
@@ -391,6 +466,14 @@ export class CredentialClient extends BaseClient {
       .setTimeout(timeout)
       .build();
 
+    const confirmed = await executeTransaction(
+      this.server,
+      tx,
+      (t) => t.sign(issuerKeypair),
+      txOptions
+    );
+    const raw = decodeCredentialId(confirmed.returnValue!);
+    return Buffer.from(raw).toString("hex");
     try {
       const prepared = await retryWithBackoff(() => this.server.prepareTransaction(tx));
       prepared.sign(issuerKeypair);
@@ -509,6 +592,7 @@ export class CredentialClient extends BaseClient {
       networkPassphrase: this.config.networkPassphrase,
     })
       .addOperation(
+        this.contract.call("verify_credential", encodeBytes(idBytes))
         this.contract.call(
           "verify_credential",
           ...buildVerifyCredentialArgs({ credentialId: idBytes })
@@ -530,6 +614,7 @@ export class CredentialClient extends BaseClient {
       return { valid: false, reason: 'unknown' };
     }
 
+    const valid = decodeBoolean(
     const retval = scValToNative(
       (result as SorobanRpc.Api.SimulateTransactionSuccessResponse).result!.retval
     );
@@ -538,7 +623,6 @@ export class CredentialClient extends BaseClient {
       return { valid: true };
     }
 
-    // Contract returned false — fetch the credential to determine why
     try {
       const credential = await this.getCredential(callerAddress, credentialId, options);
       if (credential.revoked) return { valid: false, reason: 'revoked' };
@@ -547,6 +631,7 @@ export class CredentialClient extends BaseClient {
       }
       return { valid: false, reason: 'unknown' };
     } catch {
+      return { valid: false, reason: "not_found" };
       return { valid: false, reason: 'unknown' };
     }
   }
@@ -586,6 +671,7 @@ export class CredentialClient extends BaseClient {
       .addOperation(
         this.contract.call(
           "get_subject_credentials",
+          encodeAddress(subjectAddress)
           ...buildGetSubjectCredentialsArgs({ subject: subjectAddress })
         )
       )
@@ -602,6 +688,8 @@ export class CredentialClient extends BaseClient {
       throw new SorobanIdentityError(`Simulation failed: ${errMsg}`, "CONTRACT_ERROR");
     }
 
+    const ids = decodeCredentialIdList(
+      (idsResult as SorobanRpc.Api.SimulateTransactionSuccessResponse).result!.retval
     const ids = scValToNative(
       (idsResult as SorobanRpc.Api.SimulateTransactionSuccessResponse)
         .result!.retval
@@ -672,10 +760,10 @@ export class CredentialClient extends BaseClient {
       throw contractErr;
     }
 
-    return scValToNative(
+    return decodeCredential(
       (result as SorobanRpc.Api.SimulateTransactionSuccessResponse)
         .result!.retval
-    ) as Credential;
+    );
   }
 
   /**
@@ -1174,6 +1262,7 @@ export class CredentialClient extends BaseClient {
       networkPassphrase: this.config.networkPassphrase,
     })
       .addOperation(
+        this.contract.call("get_credential", encodeBytes(idBytes))
         this.contract.call(
           'list_issuer_credentials',
           ...buildListIssuerCredentialsArgs({
@@ -1194,6 +1283,9 @@ export class CredentialClient extends BaseClient {
       throw new SorobanIdentityError(`Simulation failed: ${errMsg}`, 'CONTRACT_ERROR');
     }
 
+    return decodeCredential(
+      (result as SorobanRpc.Api.SimulateTransactionSuccessResponse).result!.retval
+    );
     const raw = scValToNative(
       (result as SorobanRpc.Api.SimulateTransactionSuccessResponse).result!.retval
     ) as { items: Uint8Array[]; next_cursor: number | null };
@@ -1266,6 +1358,80 @@ export class CredentialClient extends BaseClient {
     }
 
     return { succeeded, failed };
+  }
+
+  /**
+   * Query credentials by a specific claim key-value pair.
+   *
+   * **IMPORTANT:** This is a client-side filter that fetches all credentials
+   * for the subject and filters them locally. On-chain claim indexing is not
+   * supported due to the opaque storage model — credentials serialize claims
+   * as a single `Map<String, String>` blob without per-claim indexes.
+   *
+   * **Performance caveat:** For subjects with many credentials (hundreds or
+   * thousands), this method will fetch and deserialize every credential before
+   * filtering. The recommended production approach is to index claim data
+   * off-chain via contract event listening and query your own database.
+   *
+   * Use this method only for:
+   * - Development and testing with small credential sets
+   * - One-off queries where off-chain indexing is not available
+   * - Subjects known to have a bounded number of credentials (< 100)
+   *
+   * For production at scale, implement off-chain indexing:
+   * 1. Listen to `credential.issued` events from the contract
+   * 2. Extract and store claim key-value pairs in a queryable database
+   * 3. Query your database directly instead of this method
+   *
+   * @param callerAddress  Stellar address used to build read simulations.
+   * @param subjectAddress The address whose credentials to search.
+   * @param claimKey       The claim key to filter by (e.g., 'country').
+   * @param claimValue     The expected value (e.g., 'NG'). Case-sensitive exact match.
+   * @param options        Per-call overrides (currently `timeoutSeconds`).
+   * @returns Array of {@link Credential} records where `claims[claimKey] === claimValue`.
+   * @throws {SorobanIdentityError} on simulation failure or if the subject has
+   *   no credentials.
+   *
+   * @example
+   * ```ts
+   * // Find all KYC credentials where country=NG
+   * const ngCreds = await credentials.getCredentialsByClaimKey(
+   *   caller,
+   *   subject,
+   *   'country',
+   *   'NG'
+   * );
+   * console.log(`Found ${ngCreds.length} Nigerian KYC records`);
+   * ```
+   */
+  async getCredentialsByClaimKey(
+    callerAddress: string,
+    subjectAddress: string,
+    claimKey: string,
+    claimValue: string,
+    options?: CallOptions
+  ): Promise<Credential[]> {
+    // Fetch all credentials for the subject
+    const allCredentials = await this.getCredentialsBySubject(
+      callerAddress,
+      subjectAddress,
+      options
+    );
+
+    // Client-side filter for matching claim
+    return allCredentials.filter((cred) => {
+      // Convert Map-like claims structure to plain object for easier access
+      const claims = cred.claims as unknown as Map<string, string>;
+      
+      // Handle both native Map and plain object representations
+      if (claims instanceof Map) {
+        return claims.get(claimKey) === claimValue;
+      } else if (typeof claims === 'object') {
+        return (claims as Record<string, string>)[claimKey] === claimValue;
+      }
+      
+      return false;
+    });
   }
 
   /**

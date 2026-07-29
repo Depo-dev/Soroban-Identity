@@ -228,7 +228,7 @@ export function createApiKeyAuthMiddleware(options: ApiKeyMiddlewareOptions) {
       return;
     }
     if (options.requireScope && !record.scopes.includes(options.requireScope)) {
-      sendError(res, 401, new SorobanIdentityError(`scope ${options.requireScope} required`, "UNAUTHORIZED"));
+      sendError(res, 403, new SorobanIdentityError(`scope ${options.requireScope} required`, "UNAUTHORIZED"));
       return;
     }
     await options.store.touch(record.id, now());
