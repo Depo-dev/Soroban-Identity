@@ -3,6 +3,17 @@ import { Account, BASE_FEE, Contract, Keypair, Networks, xdr } from "@stellar/st
 import { SorobanTransactionBuilder } from "./transaction-builder";
 import type { SorobanIdentityConfig } from "./types";
 
+vi.mock("@stellar/stellar-sdk", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@stellar/stellar-sdk")>();
+  return {
+    ...actual,
+    SorobanRpc: {
+      ...actual.SorobanRpc,
+      Server: vi.fn(),
+    },
+  };
+});
+
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
@@ -52,7 +63,7 @@ describe("SorobanTransactionBuilder.estimateFee (#477)", () => {
         return { minResourceFee: "100" };
       }),
     };
-    vi.spyOn(SorobanRpc, "Server" as any).mockImplementation(() => mockServer);
+    vi.mocked(SorobanRpc.Server as any).mockImplementation(() => mockServer);
 
     const builder = makeBuilder(); // no ops accumulated
     const op = makeOp();
@@ -61,7 +72,7 @@ describe("SorobanTransactionBuilder.estimateFee (#477)", () => {
     expect(capturedTx).not.toBeNull();
     expect(capturedTx.operations).toHaveLength(1);
 
-    vi.restoreAllMocks();
+    vi.mocked(SorobanRpc.Server as any).mockReset();
   });
 
   it("uses accumulated operations instead of the single argument (#477)", async () => {
@@ -74,7 +85,7 @@ describe("SorobanTransactionBuilder.estimateFee (#477)", () => {
         return { minResourceFee: "300" };
       }),
     };
-    vi.spyOn(SorobanRpc, "Server" as any).mockImplementation(() => mockServer);
+    vi.mocked(SorobanRpc.Server as any).mockImplementation(() => mockServer);
 
     const builder = makeBuilder();
     // Accumulate 3 operations on the builder.
@@ -94,7 +105,7 @@ describe("SorobanTransactionBuilder.estimateFee (#477)", () => {
     expect(estimate.resourceFee).toBe(300);
     expect(estimate.totalFee).toBe(baseFee + 300);
 
-    vi.restoreAllMocks();
+    vi.mocked(SorobanRpc.Server as any).mockReset();
   });
 
   it("fee estimate scales with operation count (single vs multi)", async () => {
@@ -106,7 +117,7 @@ describe("SorobanTransactionBuilder.estimateFee (#477)", () => {
         minResourceFee: String(tx.operations.length * 100),
       })),
     };
-    vi.spyOn(SorobanRpc, "Server" as any).mockImplementation(() => mockServer);
+    vi.mocked(SorobanRpc.Server as any).mockImplementation(() => mockServer);
 
     const singleBuilder = makeBuilder();
     const singleEstimate = await singleBuilder.estimateFee(makeOp());
@@ -121,6 +132,6 @@ describe("SorobanTransactionBuilder.estimateFee (#477)", () => {
     expect(multiEstimate.resourceFee).toBe(300);
     expect(singleEstimate.resourceFee).toBe(100);
 
-    vi.restoreAllMocks();
+    vi.mocked(SorobanRpc.Server as any).mockReset();
   });
 });

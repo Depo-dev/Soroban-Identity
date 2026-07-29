@@ -1,83 +1,3 @@
-export type SorobanErrorCode =
-  | "ALREADY_INITIALIZED"
-  | "ALREADY_EXISTS"
-  | "NOT_FOUND"
-  | "UNAUTHORIZED"
-  | "NOT_AN_ISSUER"
-  | "NOT_A_REPORTER"
-  | "CONTRACT_ERROR"
-  | "UNKNOWN";
-
-export class SorobanIdentityError extends Error {
-  code: SorobanErrorCode;
-  contractCode?: number;
-
-  constructor(message: string, code: SorobanErrorCode, contractCode?: number) {
-    super(message);
-    this.name = "SorobanIdentityError";
-    this.code = code;
-    this.contractCode = contractCode;
-  }
-}
-
-const IDENTITY_ERRORS: Record<number, { code: SorobanErrorCode; message: string }> = {
-  1: { code: "ALREADY_INITIALIZED", message: "Registry is already initialized" },
-  2: { code: "ALREADY_EXISTS", message: "DID already exists for this address" },
-  3: { code: "NOT_FOUND", message: "DID not found" },
-  4: { code: "UNAUTHORIZED", message: "Unauthorized operation" },
-};
-
-const CREDENTIAL_ERRORS: Record<number, { code: SorobanErrorCode; message: string }> = {
-  1: { code: "ALREADY_INITIALIZED", message: "Credential manager is already initialized" },
-  2: { code: "ALREADY_INITIALIZED", message: "Not initialized" },
-  3: { code: "NOT_FOUND", message: "Credential not found" },
-  4: { code: "UNAUTHORIZED", message: "Only the issuer can perform this action" },
-  5: { code: "NOT_AN_ISSUER", message: "Not a registered issuer" },
-};
-
-const REPUTATION_ERRORS: Record<number, { code: SorobanErrorCode; message: string }> = {
-  1: { code: "ALREADY_INITIALIZED", message: "Reputation contract is already initialized" },
-  2: { code: "ALREADY_INITIALIZED", message: "Not initialized" },
-  3: { code: "NOT_A_REPORTER", message: "Not a registered reporter" },
-};
-
-/**
- * Helper to parse raw Soroban simulation / tx errors into typed SorobanIdentityError.
- */
-export function parseContractError(
-  error: unknown,
-  contractType: "identity" | "credential" | "reputation"
-): SorobanIdentityError {
-  if (error instanceof SorobanIdentityError) {
-    return error;
-  }
-  const errStr = error instanceof Error ? error.message : String(error);
-
-  // Match pattern like Error(Contract, 3) or Error(Contract, #3)
-  const match =
-    errStr.match(/Error\(Contract,\s*#?(\d+)\)/i) ||
-    errStr.match(/contract error #?(\d+)/i);
-  if (match) {
-    const codeNum = parseInt(match[1], 10);
-    const map =
-      contractType === "identity"
-        ? IDENTITY_ERRORS
-        : contractType === "credential"
-        ? CREDENTIAL_ERRORS
-        : REPUTATION_ERRORS;
-
-    const mapped = map[codeNum];
-    if (mapped) {
-      return new SorobanIdentityError(mapped.message, mapped.code, codeNum);
-    }
-    return new SorobanIdentityError(
-      `Contract error #${codeNum}`,
-      "CONTRACT_ERROR",
-      codeNum
-    );
-  }
-
-  return new SorobanIdentityError(errStr, "UNKNOWN");
 /**
  * Discriminator for {@link SorobanIdentityError}. Callers can branch on
  * `err.code` to handle each class without parsing the message.
@@ -104,6 +24,8 @@ export function parseContractError(
 export type SorobanErrorCode =
   | "NOT_FOUND"
   | "UNAUTHORIZED"
+  | "NOT_AN_ISSUER"
+  | "NOT_A_REPORTER"
   | "ALREADY_EXISTS"
   | "INVALID_INPUT"
   | "INVALID_ADDRESS"
@@ -119,6 +41,7 @@ export type SorobanErrorCode =
   | "RATE_LIMITED"
   | "TIMEOUT"
   | "VALIDATION_ERROR"
+  | "CLIENT_NOT_READY"
   | "CLIENT_DISPOSED"
   | "UNKNOWN";
 
@@ -153,6 +76,7 @@ export class SorobanIdentityError extends Error {
   /** Discriminator code — see {@link SorobanErrorCode}. */
   readonly code: SorobanErrorCode;
   readonly details?: Record<string, unknown>;
+  readonly contractCode?: number;
   /** The underlying error, if this wraps one. */
   readonly originalError?: unknown;
   /** Transaction hash when the failure is tied to an on-chain submission. */
@@ -180,9 +104,11 @@ export class SorobanIdentityError extends Error {
       this.details = codeOrInit.details;
       this.originalError = codeOrInit.originalError ?? originalError;
       this.txHash = codeOrInit.txHash;
+      this.contractCode = typeof codeOrInit.details?.contractCode === "number" ? codeOrInit.details.contractCode : undefined;
     } else {
       this.code = codeOrInit;
       this.originalError = originalError;
+      this.contractCode = typeof originalError === "number" ? originalError : undefined;
     }
   }
 
@@ -194,6 +120,47 @@ export class SorobanIdentityError extends Error {
       ...(this.txHash ? { txHash: this.txHash } : {}),
     };
   }
+}
+
+const IDENTITY_ERRORS: Record<number, { code: SorobanErrorCode; message: string }> = {
+  1: { code: "ALREADY_EXISTS", message: "Registry is already initialized" },
+  2: { code: "ALREADY_EXISTS", message: "DID already exists for this address" },
+  3: { code: "NOT_FOUND", message: "DID not found" },
+  4: { code: "UNAUTHORIZED", message: "Unauthorized operation" },
+};
+
+const CREDENTIAL_ERRORS: Record<number, { code: SorobanErrorCode; message: string }> = {
+  1: { code: "ALREADY_EXISTS", message: "Credential manager is already initialized" },
+  2: { code: "ALREADY_EXISTS", message: "Not initialized" },
+  3: { code: "NOT_FOUND", message: "Credential not found" },
+  4: { code: "UNAUTHORIZED", message: "Only the issuer can perform this action" },
+  5: { code: "NOT_AN_ISSUER", message: "Not a registered issuer" },
+};
+
+const REPUTATION_PARSE_ERRORS: Record<number, { code: SorobanErrorCode; message: string }> = {
+  1: { code: "ALREADY_EXISTS", message: "Reputation contract is already initialized" },
+  2: { code: "ALREADY_EXISTS", message: "Not initialized" },
+  3: { code: "NOT_A_REPORTER", message: "Not a registered reporter" },
+};
+
+/** Helper to parse raw Soroban simulation / tx errors into typed SorobanIdentityError. */
+export function parseContractError(
+  error: unknown,
+  contractType: "identity" | "credential" | "reputation"
+): SorobanIdentityError {
+  if (error instanceof SorobanIdentityError) return error;
+  const errStr = error instanceof Error ? error.message : String(error);
+  const match =
+    errStr.match(/Error\(Contract,\s*#?(\d+)\)/i) ||
+    errStr.match(/contract error #?(\d+)/i);
+  if (match) {
+    const codeNum = parseInt(match[1] as string, 10);
+    const map = contractType === "identity" ? IDENTITY_ERRORS : contractType === "credential" ? CREDENTIAL_ERRORS : REPUTATION_PARSE_ERRORS;
+    const mapped = map[codeNum];
+    if (mapped) return new SorobanIdentityError(mapped.message, { code: mapped.code, details: { contractCode: codeNum } });
+    return new SorobanIdentityError(`Contract error #${codeNum}`, { code: "CONTRACT_ERROR", details: { contractCode: codeNum } });
+  }
+  return new SorobanIdentityError(errStr, "UNKNOWN");
 }
 
 /**

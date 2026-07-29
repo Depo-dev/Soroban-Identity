@@ -121,6 +121,7 @@ export function buildIssueCredentialArgs(params: {
   signature: Buffer;
   expiresAt: bigint;
 }): xdr.ScVal[] {
+  const expiresAt = encodeU64(params.expiresAt);
   return [
     nativeToScVal(params.issuer, { type: 'address' }),
     nativeToScVal(params.subject, { type: 'address' }),
@@ -128,7 +129,7 @@ export function buildIssueCredentialArgs(params: {
     nativeToScVal(params.claims, { type: 'map' }),
     nativeToScVal(params.claimsHash, { type: 'bytes' }),
     nativeToScVal(params.signature, { type: 'bytes' }),
-    encodeU64(params.expiresAt),
+    expiresAt,
   ];
 }
 
@@ -278,6 +279,24 @@ export function buildListIssuerCredentialsArgs(params: {
     nativeToScVal(params.issuer, { type: 'address' }),
     params.cursor,
     nativeToScVal(params.limit, { type: 'u32' }),
+  ];
+}
+
+
+/**
+ * Build args for `get_revocations(issuer, subject)`.
+ *
+ * @param params.issuer  Issuer address in the revocation pair.
+ * @param params.subject Subject address in the revocation pair.
+ * @returns ScVal array ready for `contract.call('get_revocations', ...)`.
+ */
+export function buildGetRevocationsArgs(params: {
+  issuer: string;
+  subject: string;
+}): xdr.ScVal[] {
+  return [
+    nativeToScVal(params.issuer, { type: 'address' }),
+    nativeToScVal(params.subject, { type: 'address' }),
   ];
 }
 

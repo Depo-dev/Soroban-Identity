@@ -1,5 +1,6 @@
 import { describe, it, expect } from "vitest";
-import { parseContractError, SorobanIdentityError } from "./errors";
+import { ContractError, parseContractError, SorobanIdentityError, classifyError, wrapError } from "./errors";
+import { SorobanErrorCodes } from "./error-codes";
 
 describe("parseContractError", () => {
   it("parses IdentityError variants", () => {
@@ -27,13 +28,9 @@ describe("parseContractError", () => {
   it("returns UNKNOWN for generic errors", () => {
     const parsed = parseContractError(new Error("Network disconnect"), "identity");
     expect(parsed.code).toBe("UNKNOWN");
-import {
-  ContractError,
-  SorobanIdentityError,
-  classifyError,
-  wrapError,
-} from "./errors";
-import { SorobanErrorCodes } from "./error-codes";
+  });
+});
+
 
 describe("SorobanIdentityError envelope (#249)", () => {
   it("accepts the legacy positional constructor", () => {

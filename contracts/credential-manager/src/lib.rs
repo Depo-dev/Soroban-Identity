@@ -19,6 +19,7 @@ const CRED_CNT: Symbol = symbol_short!("CREDCNT");
 const REVOKED_CNT: Symbol = symbol_short!("REVCNT");
 const TOTAL_ISSUED_CNT: Symbol = symbol_short!("TOTALCNT");
 const ISSUER_CREDS: Symbol = symbol_short!("ISSCREDS");
+const REVOCATIONS: Symbol = symbol_short!("REVOKEIX");
 const SCHEMA: Symbol = symbol_short!("SCHEMA");
 const IDENTITY_REGISTRY: Symbol = symbol_short!("IDREGIST");
 /// Issue #551: reentrancy guard flag. Set for the duration of any function
@@ -363,6 +364,13 @@ impl CredentialManager {
         }
         cred.revoked = true;
         env.storage().persistent().set(&key, &cred);
+
+        let mut revocations = Self::fetch_revocations(&env, &issuer, &cred.subject);
+        revocations.push_back(credential_id.clone());
+        let revocations_key = Self::revocations_key(&issuer, &cred.subject);
+        env.storage().persistent().set(&revocations_key, &revocations);
+        env.storage().persistent().extend_ttl(&revocations_key, TTL_MAX, TTL_MAX);
+
         let revoked: u32 = env.storage().instance().get(&REVOKED_CNT).unwrap_or(0);
         env.storage().instance().set(&REVOKED_CNT, &(revoked + 1));
         env.events().publish((CRED, symbol_short!("revoked")), (EVENT_VERSION, credential_id, issuer));
@@ -500,6 +508,10 @@ impl CredentialManager {
         Self::fetch_issuer_creds(&env, &issuer)
     }
 
+    pub fn get_revocations(env: Env, issuer: Address, subject: Address) -> Vec<BytesN<32>> {
+        Self::fetch_revocations(&env, &issuer, &subject)
+    }
+
     pub fn list_issuer_credentials(env: Env, issuer: Address, cursor: Option<u64>, limit: u32) -> CredentialIdsPage {
         let all = Self::fetch_issuer_creds(&env, &issuer);
         let total = all.len();
@@ -616,6 +628,10 @@ impl CredentialManager {
         (ISSUER_CREDS, issuer.clone())
     }
 
+    fn revocations_key(issuer: &Address, subject: &Address) -> (Symbol, Address, Address) {
+        (REVOCATIONS, issuer.clone(), subject.clone())
+    }
+
     fn fetch_subject_creds(env: &Env, subject: &Address) -> Vec<BytesN<32>> {
         let key = Self::subject_key(subject);
         if env.storage().persistent().has(&key) {
@@ -626,6 +642,14 @@ impl CredentialManager {
 
     fn fetch_issuer_creds(env: &Env, issuer: &Address) -> Vec<BytesN<32>> {
         let key = Self::issuer_creds_key(issuer);
+        if env.storage().persistent().has(&key) {
+            env.storage().persistent().extend_ttl(&key, TTL_MAX, TTL_MAX);
+        }
+        env.storage().persistent().get(&key).unwrap_or_else(|| Vec::new(env))
+    }
+
+    fn fetch_revocations(env: &Env, issuer: &Address, subject: &Address) -> Vec<BytesN<32>> {
+        let key = Self::revocations_key(issuer, subject);
         if env.storage().persistent().has(&key) {
             env.storage().persistent().extend_ttl(&key, TTL_MAX, TTL_MAX);
         }

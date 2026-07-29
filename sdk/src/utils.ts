@@ -34,24 +34,27 @@ export async function retryWithBackoff<T>(
  *
  * @param server      - SorobanRpc.Server instance
  * @param hash        - Transaction hash
- * @param maxAttempts - Maximum polling attempts (default: 10)
- * @param intervalMs  - Polling interval in ms (default: 2000)
+ * @param maxRetries      - Maximum polling attempts (default: 15)
+ * @param retryIntervalMs - Fixed polling interval in ms (default: 2000)
  */
 export async function pollTransactionStatus(
   server: SorobanRpc.Server,
   hash: string,
   options?: {
+    maxRetries?: number;
+    retryIntervalMs?: number;
+    /** @deprecated Use maxRetries. */
     maxAttempts?: number;
+    /** @deprecated Use retryIntervalMs. */
     intervalMs?: number;
     exponentialBackoff?: boolean;
   }
 ): Promise<void> {
-  const maxAttempts = options?.maxAttempts ?? 10;
-  const exponentialBackoff = options?.exponentialBackoff ?? true;
-  let intervalMs = options?.intervalMs ?? 2000;
+  const maxRetries = options?.maxRetries ?? options?.maxAttempts ?? 15;
+  const exponentialBackoff = options?.exponentialBackoff ?? false;
+  let intervalMs = options?.retryIntervalMs ?? options?.intervalMs ?? 2000;
 
-  for (let attempt = 0; attempt < maxAttempts; attempt++) {
-    await delay(intervalMs);
+  for (let attempt = 0; attempt < maxRetries; attempt++) {
     const status = await server.getTransaction(hash);
 
     if (status.status === SorobanRpc.Api.GetTransactionStatus.SUCCESS) {
@@ -61,12 +64,15 @@ export async function pollTransactionStatus(
       throw new SorobanIdentityError(`Transaction failed on-chain: ${(status as any).resultXdr || 'unknown error'}`, "CONTRACT_ERROR");
     }
 
-    if (exponentialBackoff) {
-      intervalMs *= 2;
+    if (attempt < maxRetries - 1) {
+      await delay(intervalMs);
+      if (exponentialBackoff) {
+        intervalMs *= 2;
+      }
     }
   }
   throw new SorobanIdentityError(
-    `Transaction confirmation timed out after ${maxAttempts} retries`,
+    `Transaction confirmation timed out after ${maxRetries} retries`,
     "TIMEOUT"
   );
 }

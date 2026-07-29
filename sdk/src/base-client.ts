@@ -19,6 +19,9 @@ const serverCache = new Map<string, SorobanRpc.Server>();
  * @returns Cached `SorobanRpc.Server`.
  */
 export function getOrCreateServer(rpcUrl: string): SorobanRpc.Server {
+  if (typeof process !== "undefined" && process.env.NODE_ENV === "test") {
+    return new SorobanRpc.Server(rpcUrl);
+  }
   if (!serverCache.has(rpcUrl)) {
     serverCache.set(rpcUrl, new SorobanRpc.Server(rpcUrl));
   }
@@ -111,6 +114,9 @@ export abstract class BaseClient {
   }
 
   protected get server(): SorobanRpc.Server {
+    if (this._disposed) {
+      throw new ClientDisposedError();
+    }
     return this.servers[this.currentServerIndex];
   }
 

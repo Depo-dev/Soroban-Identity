@@ -1,8 +1,4 @@
-export { IdentityClient } from "./identity";
-export { CredentialClient } from "./credentials";
-export { ReputationClient } from "./reputation";
-export { SorobanIdentityError, parseContractError } from "./errors";
-export type { SorobanErrorCode } from "./errors";
+import type { SorobanIdentityConfig } from './types';
 export * as v1 from './v1';
 export { IdentityClient } from './identity';
 export { health, healthCheck } from './health';
@@ -18,10 +14,7 @@ export type {
   PresentationVerifyResult,
   PresentationVerifyFailReason,
 } from './presentation';
-export { SorobanEventListener, getEvents, subscribeToEvents } from './events';
-export type { SubscribeOptions } from './events';
-export { getServerInfo, UnsupportedEndpointError } from './server-info';
-export type { ServerInfo } from './server-info';
+export { SorobanEventListener, getEvents } from './events';
 export { SorobanTransactionBuilder } from './transaction-builder';
 export { RequestQueue } from './request-queue';
 export {
@@ -35,11 +28,9 @@ export {
   ContractError,
   SorobanIdentityError,
   RateLimitError,
-  ClientDisposedError,
   classifyError,
   wrapError,
 } from './errors';
-export { UnknownCredentialTypeError, assertCredentialType } from './types';
 export type {
   SorobanErrorCode,
   SorobanIdentityErrorInit,
@@ -53,13 +44,14 @@ export {
   REPUTATION_ERRORS,
 } from './error-codes';
 export { clearServerCache, SDK_VERSION } from './base-client';
-export { toW3CDidDocument, exportDidDocumentAsJsonLd, flattenSubject, serializeClaimValue, hashSubjectClaims } from './serializers';
+export { toW3CDidDocument, exportDidDocumentAsJsonLd } from './serializers';
 export {
   buildCreateDidArgs,
   buildUpdateDidArgs,
   buildResolveDidArgs,
   buildHasActiveDidArgs,
   buildDeactivateDidArgs,
+  buildDidExistsArgs,
   buildIssueCredentialArgs,
   buildRevokeCredentialArgs,
   buildVerifyCredentialArgs,
@@ -78,6 +70,7 @@ export {
   buildListHistoryArgs,
   buildGetIssuerCredentialsArgs,
   buildListIssuerCredentialsArgs,
+  buildGetRevocationsArgs,
 } from './contract-args';
 export type {
   DidDocument,
@@ -88,12 +81,6 @@ export type {
   CredentialListOptions,
   VerifyResult,
   VerifyFailReason,
-  SorobanIdentityConfig,
-  ReputationRecord,
-  ScoreHistoryEntry,
-} from "./types";
-export { executeTransaction } from "./transaction";
-export type { TxOptions } from "./transaction";
   CallOptions,
   IdentityStorageStats,
   CredentialStorageStats,
@@ -126,5 +113,3 @@ export const MAINNET_CONFIG: SorobanIdentityConfig = {
   credentialManagerId: '',
   reputationId: '',
 };
-export type { FeeEstimate } from './types';
-export { SimulationError } from './types';
