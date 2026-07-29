@@ -26,3 +26,7 @@ src/
 | `verify_credential(credential_id)` | Return true if credential exists, is not revoked, and is not expired |
 | `get_credential(credential_id)` | Fetch a credential by ID |
 | `get_subject_credentials(subject)` | List all credential IDs issued to a subject |
+
+## Issuer credential ring buffer
+
+Each issuer's reverse-lookup index (`get_issuer_credentials`) is capped at `MAX_ISSUER_CREDS` (10,000) entries. Once an issuer reaches the cap, issuing a new credential evicts the oldest entry (FIFO) to make room — the credential itself is **not** deleted or revoked, only its reference in that issuer's index is dropped. An `evicted` event (topic `CRED,evicted`, payload `[eventVersion, issuer, evictedId]`, see [docs/contract-events.md](../../docs/contract-events.md)) is emitted whenever this happens, so off-chain indexers can detect the eviction and re-index the dropped credential ID by other means (e.g. `get_subject_credentials`) if needed.

@@ -1,0 +1,18 @@
+[package]
+name = "soroban-identity-interface"
+version = "0.1.0"
+edition = "2021"
+description = "Stable Rust trait ABI for the Soroban Identity contracts (identity-registry, credential-manager, reputation)."
+
+[lib]
+crate-type = ["rlib"]
+
+[dependencies]
+soroban-sdk = { version = "21.0.0", features = ["alloc"] }
+shared-errors = { path = "../shared-errors" }
+identity-registry = { path = "../identity-registry" }
+credential-manager = { path = "../credential-manager" }
+reputation = { path = "../reputation" }
+
+[dev-dependencies]
+soroban-sdk = { version = "21.0.0", features = ["testutils"] }
