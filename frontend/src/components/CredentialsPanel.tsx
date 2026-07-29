@@ -784,6 +784,7 @@ export default function CredentialsPanel({ verifyId }: { verifyId?: string | nul
               <button onClick={handleIssue} disabled={issuing || Object.keys(issueErrors).length > 0}>
                 {issuing ? "Issuing…" : "Issue KYC Credential"}
               </button>
+              {issuing && <SkeletonCard variant="credential" />}
             </>
           ) : (
             <p style={{ color: "var(--text-muted)", fontSize: "0.85rem" }}>
@@ -795,7 +796,7 @@ export default function CredentialsPanel({ verifyId }: { verifyId?: string | nul
             Connect your Freighter wallet to issue credentials as a registered issuer.
           </p>
         )}
-        {issueResult && <pre className="result">{issueResult}</pre>}
+        {!issuing && issueResult && <pre className="result">{issueResult}</pre>}
       </div>
     </>
   );

@@ -780,13 +780,14 @@ export default function IdentityPanel() {
             <button onClick={handleCreate} disabled={creating}>
               {creating ? 'Creating…' : 'Create DID'}
             </button>
+            {creating && <SkeletonCard variant="identity" />}
           </>
         ) : (
           <p style={{ color: 'var(--text-muted)', fontSize: '0.85rem' }}>
             Connect your Freighter wallet to create a new on-chain DID.
           </p>
         )}
-        {createResult && <pre className="result">{createResult}</pre>}
+        {!creating && createResult && <pre className="result">{createResult}</pre>}
       </div>
 
       <div className="card">
@@ -883,7 +884,8 @@ export default function IdentityPanel() {
             <button onClick={handleUpdate} disabled={updating}>
               {updating ? 'Updating…' : 'Update DID'}
             </button>
-            {updateSuccess && (
+            {updating && <SkeletonCard variant="identity" />}
+            {!updating && updateSuccess && (
               <div style={{
                 marginTop: '0.75rem',
                 padding: '0.5rem 1rem',

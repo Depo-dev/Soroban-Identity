@@ -92,6 +92,7 @@ export type {
   SorobanIdentityConfig,
   ReputationRecord,
   ScoreHistoryEntry,
+  AccountInfo,
 } from "./types";
 export { executeTransaction } from "./transaction";
 export type { TxOptions } from "./transaction";
