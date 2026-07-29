@@ -18,6 +18,12 @@ const CRED_CNT: Symbol = symbol_short!("CREDCNT");
 const REVOKED_CNT: Symbol = symbol_short!("REVCNT");
 const TOTAL_ISSUED_CNT: Symbol = symbol_short!("TOTALCNT");
 const ISSUER_CREDS: Symbol = symbol_short!("ISSCREDS");
+/// Per (issuer, subject, credential_type) issuance counter, mixed into the
+/// credential ID so re-issuing after a revocation never collides with the
+/// original storage key. See issue #467.
+const ISS_NONCE: Symbol = symbol_short!("ISSNONCE");
+
+const MAX_ISSUERS: u32 = 100;
 const SCHEMA: Symbol = symbol_short!("SCHEMA");
 const IDENTITY_REGISTRY: Symbol = symbol_short!("IDREGIST");
 /// Issue #551: reentrancy guard flag. Set for the duration of any function
@@ -210,6 +216,38 @@ impl CredentialManager {
         Ok(())
     }
 
+    /// Issues a verifiable credential to a subject. Caller must be a registered issuer.
+    ///
+    /// The credential ID is derived deterministically as
+    /// `sha256(issuer_xdr || subject_xdr || type_tag || nonce)`, where `nonce` is
+    /// a per-(issuer, subject, type) issuance counter. This means the same issuer
+    /// cannot have two *simultaneously active* credentials of the same type for
+    /// the same subject (the previous one must be revoked first), but each
+    /// issuance still gets a unique ID — re-issuing after a revocation never
+    /// overwrites the original record. See issue #467.
+    ///
+    /// # Arguments
+    /// * `env` - The Soroban environment.
+    /// * `issuer` - The registered issuer address (must sign the transaction).
+    /// * `subject` - The address receiving the credential.
+    /// * `credential_type` - The type of credential being issued ([`CredentialType`]).
+    /// * `claims` - Arbitrary key-value claims to embed in the credential.
+    /// * `claims_hash` - SHA-256 hash of the off-chain claims payload (32 bytes).
+    ///   Stored on-chain for privacy-preserving verification.
+    /// * `signature` - Issuer's signature over the credential data (64 bytes).
+    /// * `expires_at` - Unix timestamp in **seconds** after which the credential is invalid.
+    ///   Pass `0` for no expiry. Use `Date.now() / 1000` in the SDK, not `Date.now()`.
+    ///
+    /// # Returns
+    /// The 32-byte credential ID as [`BytesN<32>`].
+    ///
+    /// # Errors
+    /// Returns [`ContractError::CredentialAlreadyExists`] if a non-revoked credential
+    /// with the same issuer + subject + type already exists.
+    ///
+    /// # Panics
+    /// Panics with `"CredentialAlreadyExpired"` if `expires_at` is in the past.
+    /// Panics with `"not a registered issuer"` if the caller is not registered.
     pub fn issue_credential(
         env: Env,
         issuer: Address,
@@ -257,6 +295,19 @@ impl CredentialManager {
             return Err(ContractError::CredentialExpired);
         }
 
+        // Per (issuer, subject, type) issuance counter, mixed into the ID so a
+        // re-issuance after revocation never overwrites the original record.
+        let nonce_key = Self::nonce_key(&env, &issuer, &subject, &credential_type);
+        let current_nonce: u64 = env.storage().persistent().get(&nonce_key).unwrap_or(0);
+
+        // Reject if the most recently issued credential for this triple is not revoked.
+        if current_nonce > 0 {
+            let existing_id = Self::derive_id(&env, &issuer, &subject, &credential_type, current_nonce);
+            let existing_key = Self::cred_key(&existing_id);
+            if let Some(existing) = env.storage().persistent().get::<_, Credential>(&existing_key) {
+                if !existing.revoked {
+                    return Err(ContractError::CredentialAlreadyExists);
+                }
         let id = Self::derive_id(&env, &issuer, &subject, &credential_type);
         let key = Self::cred_key(&id);
         if let Some(existing) = env.storage().persistent().get::<_, Credential>(&key) {
@@ -264,6 +315,10 @@ impl CredentialManager {
                 return Err(ContractError::CredentialAlreadyExists);
             }
         }
+
+        let next_nonce = current_nonce + 1;
+        let id = Self::derive_id(&env, &issuer, &subject, &credential_type, next_nonce);
+        let key = Self::cred_key(&id);
 
         let credential = Credential {
             id: id.clone(),
@@ -283,6 +338,10 @@ impl CredentialManager {
         let ttl = Self::ttl_for_credential(&env, expires_at);
         env.storage().persistent().extend_ttl(&key, ttl, ttl);
 
+        env.storage().persistent().set(&nonce_key, &next_nonce);
+        env.storage().persistent().extend_ttl(&nonce_key, TTL_MAX, TTL_MAX);
+
+        // Index credential under subject
         let mut subject_creds = Self::fetch_subject_creds(&env, &subject);
         subject_creds.push_back(id.clone());
         let subject_key = Self::subject_key(&subject);
@@ -554,6 +613,18 @@ impl CredentialManager {
         env.storage().instance().get(&ISSUER).unwrap_or_else(|| Vec::new(env))
     }
 
+    /// Derives the deterministic credential ID as
+    /// `sha256(issuer_xdr || subject_xdr || type_tag || nonce)`. `nonce` is the
+    /// 1-based issuance count for this (issuer, subject, credential_type)
+    /// triple (see [`Self::nonce_key`]), so re-issuing after a revocation
+    /// always produces a fresh ID instead of colliding with the prior record.
+    fn derive_id(
+        env: &Env,
+        issuer: &Address,
+        subject: &Address,
+        credential_type: &CredentialType,
+        nonce: u64,
+    ) -> BytesN<32> {
     fn derive_id(env: &Env, issuer: &Address, subject: &Address, credential_type: &CredentialType) -> BytesN<32> {
         let type_tag: u8 = match credential_type {
             CredentialType::Kyc => 0,
@@ -565,11 +636,31 @@ impl CredentialManager {
         data.append(&issuer.clone().to_xdr(env));
         data.append(&subject.clone().to_xdr(env));
         data.push_back(type_tag);
+        data.extend_from_array(&nonce.to_be_bytes());
         env.crypto().sha256(&data).into()
     }
 
     fn cred_key(id: &BytesN<32>) -> (Symbol, BytesN<32>) {
         (CRED, id.clone())
+    }
+
+    fn nonce_key(
+        env: &Env,
+        issuer: &Address,
+        subject: &Address,
+        credential_type: &CredentialType,
+    ) -> (Symbol, BytesN<32>) {
+        let type_tag: u8 = match credential_type {
+            CredentialType::Kyc => 0,
+            CredentialType::Reputation => 1,
+            CredentialType::Achievement => 2,
+            CredentialType::Custom => 3,
+        };
+        let mut data = Bytes::new(env);
+        data.append(&issuer.clone().to_xdr(env));
+        data.append(&subject.clone().to_xdr(env));
+        data.push_back(type_tag);
+        (ISS_NONCE, env.crypto().sha256(&data).into())
     }
 
     fn subject_key(subject: &Address) -> (Symbol, Address) {
@@ -745,6 +836,35 @@ mod tests {
         client.verify_credential(&cred_id);
     }
 
+    /// Re-issuing after a revocation must not overwrite the original credential's
+    /// storage record: the two IDs must differ and both must remain independently
+    /// resolvable — the old one still revoked, the new one active. See issue #467.
+    #[test]
+    fn test_reissue_after_revoke_does_not_overwrite_original() {
+        let (env, _admin, client) = setup();
+        let issuer = Address::generate(&env);
+        let subject = Address::generate(&env);
+        client.add_issuer(&issuer);
+
+        let original_id = issue_kyc(&env, &client, &issuer, &subject);
+        client.revoke_credential(&issuer, &original_id);
+
+        let new_id = issue_kyc(&env, &client, &issuer, &subject);
+
+        assert_ne!(original_id, new_id);
+
+        // The original record must still exist and still be revoked, untouched
+        // by the new issuance (get_credential errors CredentialRevoked rather
+        // than CredentialNotFound, proving the record wasn't wiped/overwritten).
+        let original_result = client.try_get_credential(&original_id);
+        assert_eq!(original_result, Err(Ok(ContractError::CredentialRevoked)));
+
+        // The new record is a fresh, active credential.
+        let fresh = client.get_credential(&new_id);
+        assert!(!fresh.revoked);
+        assert_eq!(fresh.id, new_id);
+    }
+
     #[test]
     fn test_expire_credential() {
         let (env, _admin, client) = setup();
@@ -861,6 +981,29 @@ mod tests {
             }
         }
 
+        // limit=0 → caller wants the default page size (PAGE_CAP=100). All 3
+        // credentials fit in one page.
+        let page = client.list_subject_credentials(&subject, &None, &0, &None);
+        assert_eq!(page.items.len(), 3);
+        assert_eq!(page.next_cursor, None);
+    }
+
+    /// Storage namespace symbols must be pairwise distinct.
+    #[test]
+    fn test_storage_key_symbols_are_unique() {
+        let keys = [
+            ADMIN,
+            ISSUER,
+            CRED,
+            SUBJECT,
+            CRED_CNT,
+            REVOKED_CNT,
+            ISSUER_CREDS,
+            ISS_NONCE,
+        ];
+        for (i, left) in keys.iter().enumerate() {
+            for right in keys.iter().skip(i + 1) {
+                assert_ne!(left, right);
         // Index should be at MAX_ISSUER_CREDS
         let creds_before = client.get_issuer_credentials(&issuer);
         assert_eq!(creds_before.len(), MAX_ISSUER_CREDS as u32);
