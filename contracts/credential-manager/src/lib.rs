@@ -10,6 +10,7 @@ pub const CONTRACT_VERSION: u32 = 1;
 const EVENT_VERSION: u32 = 1;
 
 const ADMIN: Symbol = symbol_short!("ADMIN");
+const PAUSED: Symbol = symbol_short!("PAUSED");
 const PENDING_ADMIN: Symbol = symbol_short!("PADMIN");
 const ISSUER: Symbol = symbol_short!("ISSUER");
 const CRED: Symbol = symbol_short!("CRED");
@@ -58,6 +59,7 @@ pub enum ContractError {
     /// invocation (which is mid cross-contract call) had not yet completed.
     ReentrantCall = 14,
     SubjectHasNoDid = 15,
+    ContractPaused = 16,
 }
 
 // ── Data types ────────────────────────────────────────────────────────────────
@@ -182,6 +184,24 @@ impl CredentialManager {
         Ok(())
     }
 
+    pub fn pause(env: Env) -> Result<(), ContractError> {
+        Self::require_admin(&env)?;
+        env.storage().instance().set(&PAUSED, &true);
+        env.events().publish((symbol_short!("contract"), symbol_short!("paused")), EVENT_VERSION);
+        Ok(())
+    }
+
+    pub fn unpause(env: Env) -> Result<(), ContractError> {
+        Self::require_admin(&env)?;
+        env.storage().instance().set(&PAUSED, &false);
+        env.events().publish((symbol_short!("contract"), symbol_short!("unpaused")), EVENT_VERSION);
+        Ok(())
+    }
+
+    pub fn is_paused(env: Env) -> bool {
+        env.storage().instance().get(&PAUSED).unwrap_or(false)
+    }
+
     pub fn add_issuer(env: Env, issuer: Address) -> Result<(), ContractError> {
         Self::require_admin(&env)?;
         let mut issuers = Self::get_issuers_internal(&env);
@@ -208,6 +228,7 @@ impl CredentialManager {
 
     pub fn register_schema(env: Env, issuer: Address, schema_hash: BytesN<32>) -> Result<(), ContractError> {
         issuer.require_auth();
+        Self::require_not_paused(&env)?;
         Self::require_issuer(&env, &issuer)?;
         let schema_key = (SCHEMA, issuer.clone(), schema_hash.clone());
         env.storage().persistent().set(&schema_key, &true);
@@ -228,6 +249,7 @@ impl CredentialManager {
         schema_hash: Option<BytesN<32>>,
     ) -> Result<BytesN<32>, ContractError> {
         issuer.require_auth();
+        Self::require_not_paused(&env)?;
         Self::require_issuer(&env, &issuer)?;
 
         if let Some(ref sh) = schema_hash {
@@ -330,6 +352,7 @@ impl CredentialManager {
 
     pub fn revoke_credential(env: Env, issuer: Address, credential_id: BytesN<32>) -> Result<(), ContractError> {
         issuer.require_auth();
+        Self::require_not_paused(&env)?;
         let key = Self::cred_key(&credential_id);
         let mut cred: Credential = env.storage().persistent().get(&key).ok_or(ContractError::CredentialNotFound)?;
         if cred.issuer != issuer {
@@ -520,6 +543,13 @@ impl CredentialManager {
     fn require_admin(env: &Env) -> Result<(), ContractError> {
         let admin: Address = env.storage().instance().get(&ADMIN).ok_or(ContractError::NotInitialized)?;
         admin.require_auth();
+        Ok(())
+    }
+
+    fn require_not_paused(env: &Env) -> Result<(), ContractError> {
+        if env.storage().instance().get(&PAUSED).unwrap_or(false) {
+            return Err(ContractError::ContractPaused);
+        }
         Ok(())
     }
 

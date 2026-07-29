@@ -56,6 +56,13 @@ did:stellar:<bech32-stellar-address>
 
 Example: `did:stellar:GABC...XYZ`
 
+The identifier MUST match the following regular expression, where the address
+segment is a 56-character Stellar public key (Ed25519, `G...`):
+
+```
+^did:stellar:G[A-Z2-7]{55}$
+```
+
 This is W3C DID-compatible and portable across any dApp that integrates the SDK.
 
 ## Credential Flow

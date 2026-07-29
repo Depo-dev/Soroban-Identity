@@ -17,6 +17,7 @@ const ADMIN: Symbol = symbol_short!("ADMIN");
 const PENDING_ADMIN: Symbol = symbol_short!("PADMIN");
 const DID_COUNT: Symbol = symbol_short!("DIDCNT");
 const TOTAL_DIDS: Symbol = symbol_short!("TOTDIDS");
+const PAUSED: Symbol = symbol_short!("PAUSED");
 
 const DID_STELLAR_PREFIX: &[u8] = b"did:stellar:";
 const TTL_LEDGERS: u32 = 6_312_000;
@@ -43,6 +44,7 @@ pub enum ContractError {
     NotPendingAdmin = 11,
     ServiceAlreadyExists = 12,
     MaxServicesReached = 13,
+    ContractPaused = 14,
 }
 
 // ── Data types ────────────────────────────────────────────────────────────────
@@ -144,8 +146,39 @@ impl IdentityRegistry {
         Ok(())
     }
 
+    /// Emergency stop: admin pauses all state-changing operations.
+    /// Read-only queries remain available. Emits `contract_paused`.
+    pub fn pause(env: Env, admin: Address) -> Result<(), ContractError> {
+        admin.require_auth();
+        Self::require_admin(&env, &admin)?;
+        env.storage().instance().set(&PAUSED, &true);
+        env.events().publish(
+            (symbol_short!("contract"), symbol_short!("paused")),
+            (EVENT_VERSION, admin),
+        );
+        Ok(())
+    }
+
+    /// Lifts an emergency stop. Admin-only. Emits `contract_unpaused`.
+    pub fn unpause(env: Env, admin: Address) -> Result<(), ContractError> {
+        admin.require_auth();
+        Self::require_admin(&env, &admin)?;
+        env.storage().instance().set(&PAUSED, &false);
+        env.events().publish(
+            (symbol_short!("contract"), symbol_short!("unpaused")),
+            (EVENT_VERSION, admin),
+        );
+        Ok(())
+    }
+
+    /// Read-only: whether the contract is currently paused.
+    pub fn is_paused(env: Env) -> bool {
+        env.storage().instance().get(&PAUSED).unwrap_or(false)
+    }
+
     pub fn create_did(env: Env, controller: Address, metadata: Map<String, String>) -> Result<String, ContractError> {
         controller.require_auth();
+        Self::require_not_paused(&env)?;
         let storage = env.storage().persistent();
         let key = Self::did_key(&env, &controller);
         if storage.has(&key) {
@@ -180,6 +213,7 @@ impl IdentityRegistry {
     /// an endpoint with the same `id` is already present.
     pub fn add_service(env: Env, controller: Address, service: ServiceEndpoint) -> Result<(), ContractError> {
         controller.require_auth();
+        Self::require_not_paused(&env)?;
         let storage = env.storage().persistent();
         let key = Self::did_key(&env, &controller);
         let mut doc: DidDocument = storage.get(&key).ok_or(ContractError::DidNotFound)?;
@@ -205,6 +239,7 @@ impl IdentityRegistry {
 
     pub fn update_did(env: Env, controller: Address, metadata: Map<String, String>) -> Result<(), ContractError> {
         controller.require_auth();
+        Self::require_not_paused(&env)?;
         if metadata.is_empty() {
             return Err(ContractError::EmptyMetadata);
         }
@@ -228,6 +263,7 @@ impl IdentityRegistry {
 
     pub fn deactivate_did(env: Env, controller: Address) -> Result<(), ContractError> {
         controller.require_auth();
+        Self::require_not_paused(&env)?;
         let storage = env.storage().persistent();
         let key = Self::did_key(&env, &controller);
         let mut doc: DidDocument = storage.get(&key).ok_or(ContractError::DidNotFound)?;
@@ -258,6 +294,7 @@ impl IdentityRegistry {
     /// Returns [`ContractError::DidNotFound`] if no DID exists for the controller.
     pub fn reactivate_did(env: Env, admin: Address, controller: Address) -> Result<(), ContractError> {
         admin.require_auth();
+        Self::require_not_paused(&env)?;
 
         let stored_admin: Address = env
             .storage()
@@ -348,6 +385,7 @@ impl IdentityRegistry {
     // ── Service endpoints ─────────────────────────────────────────────────────
     pub fn remove_service(env: Env, controller: Address, service_id: String) -> Result<(), ContractError> {
         controller.require_auth();
+        Self::require_not_paused(&env)?;
         let key = Self::did_key(&env, &controller);
         let mut doc: DidDocument = env.storage().persistent().get(&key).ok_or(ContractError::DidNotFound)?;
         if !doc.active { return Err(ContractError::DidDeactivated); }
@@ -386,6 +424,19 @@ impl IdentityRegistry {
 
     fn set_admin(env: &Env, admin: &Address) {
         env.storage().instance().set(&ADMIN, admin);
+    }
+
+    fn require_admin(env: &Env, admin: &Address) -> Result<(), ContractError> {
+        let stored: Address = env.storage().instance().get(&ADMIN).ok_or(ContractError::NotInitialized)?;
+        if stored != *admin { return Err(ContractError::Unauthorized); }
+        Ok(())
+    }
+
+    fn require_not_paused(env: &Env) -> Result<(), ContractError> {
+        if env.storage().instance().get(&PAUSED).unwrap_or(false) {
+            return Err(ContractError::ContractPaused);
+        }
+        Ok(())
     }
 
     fn validate_metadata(metadata: &Map<String, String>) -> Result<(), ContractError> {
@@ -777,5 +828,62 @@ mod tests {
         client.deactivate_did(&user2);
         assert!(client.did_exists(&user2));
         assert!(!client.has_active_did(&user2));
+    }
+
+    #[test]
+    fn test_pause_blocks_writes_allows_reads() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, IdentityRegistry);
+        let client = IdentityRegistryClient::new(&env, &contract_id);
+        let admin = Address::generate(&env);
+        client.initialize(&admin);
+
+        let user = Address::generate(&env);
+        client.create_did(&user, &Map::new(&env));
+
+        assert!(!client.is_paused());
+        client.pause(&admin);
+        assert!(client.is_paused());
+
+        let user2 = Address::generate(&env);
+        assert_eq!(
+            client.try_create_did(&user2, &Map::new(&env)),
+            Err(Ok(ContractError::ContractPaused))
+        );
+
+        let doc = client.resolve_did(&user);
+        assert!(doc.active);
+        assert!(client.has_active_did(&user));
+
+        client.unpause(&admin);
+        assert!(!client.is_paused());
+        client.create_did(&user2, &Map::new(&env));
+        assert!(client.has_active_did(&user2));
+    }
+
+    #[test]
+    fn test_only_admin_can_pause() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, IdentityRegistry);
+        let client = IdentityRegistryClient::new(&env, &contract_id);
+        let admin = Address::generate(&env);
+        client.initialize(&admin);
+
+        let rando = Address::generate(&env);
+        assert_eq!(client.try_pause(&rando), Err(Ok(ContractError::Unauthorized)));
+        assert!(!client.is_paused());
+    }
+
+    #[test]
+    fn test_resolve_did_id_format() {
+        let (env, client) = setup();
+        let user = Address::generate(&env);
+        client.create_did(&user, &Map::new(&env));
+        let doc = client.resolve_did(&user);
+        let id = doc.id.to_string();
+        assert!(id.starts_with("did:stellar:"));
+        assert_eq!(doc.id.len(), 68);
     }
 }
