@@ -500,6 +500,39 @@ export class CredentialClient extends BaseClient {
   }
 
   /**
+   * Renew a credential by extending its expiry without changing the credential ID.
+   *
+   * Only the original issuer may call this. The credential must not be revoked.
+   * `newExpiresAt` must be strictly greater than the current `expires_at`.
+   *
+   * @param issuerKeypair  The registered issuer keypair that originally issued the credential.
+   * @param credentialId   Hex-encoded credential ID (32 bytes).
+   * @param newExpiresAt   New Unix timestamp (seconds). Use {@link toCredentialExpiry} to
+   *                       convert from milliseconds. Must be > current expires_at.
+   * @param options        Per-call overrides.
+   * @returns `{ txHash }` — the on-chain transaction hash.
+   * @throws {SorobanIdentityError} with code `NOT_FOUND` if credential does not exist,
+   *   `UNAUTHORIZED` if the caller is not the issuer, `VALIDATION_ERROR` if the credential
+   *   is revoked, or `INVALID_ARGUMENT` if newExpiresAt is not later than the current expiry.
+   *
+   * @example
+   * ```ts
+   * const { txHash } = await credentials.renewCredential(
+   *   issuerKeypair,
+   *   credentialId,
+   *   toCredentialExpiry(Date.now() + 30 * 24 * 60 * 60 * 1000) // +30 days
+   * );
+   * ```
+   */
+  async renewCredential(
+    issuerKeypair: Keypair,
+    credentialId: string,
+    newExpiresAt: number,
+    options?: CallOptions
+  ): Promise<{ txHash: string }> {
+    const account = await this.server.getAccount(issuerKeypair.publicKey());
+    const timeout = options?.timeoutSeconds ?? this.config.txTimeout ?? 30;
+    const idBytes = Buffer.from(credentialId, "hex");
    * Atomically revoke multiple credentials in a single transaction.
    * Maximum batch size is 50 — larger batches throw `BATCH_TOO_LARGE` before
    * submitting the transaction to the network.
@@ -537,6 +570,10 @@ export class CredentialClient extends BaseClient {
     })
       .addOperation(
         this.contract.call(
+          "renew_credential",
+          encodeAddress(issuerKeypair.publicKey()),
+          encodeBytes(idBytes),
+          encodeU64(newExpiresAt)
           'revoke_credentials_batch',
           ...buildRevokeBatchArgs({
             issuer: issuerKeypair.publicKey(),
@@ -549,6 +586,13 @@ export class CredentialClient extends BaseClient {
       .build();
 
     try {
+      const confirmed = await executeTransaction(
+        this.server,
+        tx,
+        (t) => t.sign(issuerKeypair),
+        { pollRetries: this.config.pollingRetries, pollInterval: this.config.pollingIntervalMs }
+      );
+      return { txHash: (confirmed as unknown as { txHash: string }).txHash ?? "" };
       const prepared = await retryWithBackoff(() => this.server.prepareTransaction(tx));
       prepared.sign(issuerKeypair);
 
