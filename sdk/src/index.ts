@@ -1,17 +1,79 @@
-export { IdentityClient } from "./identity";
-export { CredentialClient } from "./credentials";
-export { ReputationClient } from "./reputation";
-import type { SorobanIdentityConfig } from "./types";
-export { SorobanIdentityError, parseContractError } from "./errors";
-export type { SorobanErrorCode } from "./errors";
-export * as v1 from './v1';
+// ── Clients ───────────────────────────────────────────────────────────────────
 export { IdentityClient } from './identity';
-export { health, healthCheck } from './health';
-export type { HealthResult, HealthCheckResult } from './health';
 export { CredentialClient } from './credentials';
 export type { CredentialInput, BatchOptions, BatchResult } from './credentials';
 export { ReputationClient } from './reputation';
 export { PresentationClient } from './presentation';
+
+// ── Errors ────────────────────────────────────────────────────────────────────
+export {
+  SorobanIdentityError,
+  ContractError,
+  RateLimitError,
+  ClientDisposedError,
+  ClaimsValidationError,
+  classifyError,
+  wrapError,
+  parseContractError,
+} from './errors';
+export type { SorobanErrorCode, SorobanIdentityErrorInit } from './errors';
+
+// ── Error codes ───────────────────────────────────────────────────────────────
+export {
+  SorobanErrorCodes,
+  IDENTITY_REGISTRY_ERRORS,
+  CREDENTIAL_MANAGER_ERRORS,
+  REPUTATION_ERRORS,
+} from './error-codes';
+
+// ── Types ─────────────────────────────────────────────────────────────────────
+export {
+  UnknownCredentialTypeError,
+  assertCredentialType,
+  SimulationError,
+  validateConfig,
+} from './types';
+export type {
+  DidDocument,
+  ServiceEndpoint,
+  Credential,
+  RevokedCredential,
+  CredentialType,
+  CredentialListOptions,
+  VerifyResult,
+  VerifyFailReason,
+  SorobanIdentityConfig,
+  SorobanIdentityLogger,
+  ReputationRecord,
+  ScoreHistoryEntry,
+  AccountInfo,
+  CallOptions,
+  IdentityStorageStats,
+  CredentialStorageStats,
+  ReputationStorageStats,
+  Page,
+  PaginationOptions,
+  SorobanIdentityContractIdField,
+  ValidateConfigOptions,
+  SorobanResponse,
+  WriteResult,
+  FeeEstimate,
+} from './types';
+
+// ── Transaction helpers ───────────────────────────────────────────────────────
+export { executeTransaction } from './transaction';
+export type { TxOptions } from './transaction';
+
+// ── Events ────────────────────────────────────────────────────────────────────
+export { SorobanEventListener, getEvents, subscribeToEvents } from './events';
+export type {
+  SubscribeOptions,
+  EventFilter,
+  ContractEvent,
+  GetEventsOptions,
+} from './events';
+
+// ── Presentation ──────────────────────────────────────────────────────────────
 export type {
   VerifiablePresentation,
   VerifiableCredentialSubset,
@@ -19,10 +81,12 @@ export type {
   PresentationVerifyResult,
   PresentationVerifyFailReason,
 } from './presentation';
-export { SorobanEventListener, getEvents, subscribeToEvents } from './events';
-export type { SubscribeOptions } from './events';
+
+// ── Server info ───────────────────────────────────────────────────────────────
 export { getServerInfo, UnsupportedEndpointError } from './server-info';
 export type { ServerInfo } from './server-info';
+
+// ── Utilities ─────────────────────────────────────────────────────────────────
 export { SorobanTransactionBuilder } from './transaction-builder';
 export { RequestQueue } from './request-queue';
 export {
@@ -32,29 +96,16 @@ export {
   computeCredentialId,
   runConcurrent,
 } from './utils';
-export {
-  ContractError,
-  SorobanIdentityError,
-  RateLimitError,
-  ClientDisposedError,
-  classifyError,
-  wrapError,
-} from './errors';
-export { UnknownCredentialTypeError, assertCredentialType } from './types';
-export type {
-  SorobanErrorCode,
-  SorobanIdentityErrorInit,
-} from './errors';
-// #249 / #252 / #253 / #254 — server-layer helpers.
-export * from './server';
-export {
-  SorobanErrorCodes,
-  IDENTITY_REGISTRY_ERRORS,
-  CREDENTIAL_MANAGER_ERRORS,
-  REPUTATION_ERRORS,
-} from './error-codes';
 export { clearServerCache, SDK_VERSION } from './base-client';
-export { toW3CDidDocument, exportDidDocumentAsJsonLd, flattenSubject, serializeClaimValue, hashSubjectClaims } from './serializers';
+export {
+  toW3CDidDocument,
+  exportDidDocumentAsJsonLd,
+  flattenSubject,
+  serializeClaimValue,
+  hashSubjectClaims,
+} from './serializers';
+
+// ── Contract-arg builders ─────────────────────────────────────────────────────
 export {
   buildCreateDidArgs,
   buildUpdateDidArgs,
@@ -80,38 +131,74 @@ export {
   buildGetIssuerCredentialsArgs,
   buildListIssuerCredentialsArgs,
 } from './contract-args';
-export type {
-  DidDocument,
-  ServiceEndpoint,
-  Credential,
-  RevokedCredential,
-  CredentialType,
-  CredentialListOptions,
-  VerifyResult,
-  VerifyFailReason,
-  SorobanIdentityConfig,
-  ReputationRecord,
-  ScoreHistoryEntry,
-  AccountInfo,
-} from "./types";
-export { executeTransaction } from "./transaction";
-export type { TxOptions } from "./transaction";
-  CallOptions,
-  IdentityStorageStats,
-  CredentialStorageStats,
-  ReputationStorageStats,
-  Page,
-  PaginationOptions,
-  SorobanIdentityContractIdField,
-  ValidateConfigOptions,
-  SorobanResponse,
-} from './types';
-export { validateConfig } from './types';
-export type { ReputationRecord, ScoreHistoryEntry } from './reputation';
-export type { EventFilter, ContractEvent, GetEventsOptions } from './events';
-export type { SorobanIdentityConfig, SorobanIdentityLogger, WriteResult } from './types';
 
-// Testnet defaults — fill contract IDs after deployment
+// ── Health ────────────────────────────────────────────────────────────────────
+export { health, healthCheck } from './health';
+export type { HealthResult, HealthCheckResult } from './health';
+
+// ── Server-side helpers (API keys, rate-limiting, webhooks) ───────────────────
+export type {
+  ApiKeyScope,
+  ApiKeyMetadata,
+  ApiKeyRecord,
+  ApiKeyStore,
+  IssueApiKeyResult,
+  IssueApiKeyOptions,
+  AuthContext,
+  ApiKeyMiddlewareOptions,
+} from './server/api-keys';
+export {
+  InMemoryApiKeyStore,
+  hashApiKey,
+  issueApiKey,
+  parseAuthorizationHeader,
+  createApiKeyAuthMiddleware,
+} from './server/api-keys';
+
+export type {
+  RateClass,
+  RateLimitConfig,
+  RateLimitOptions,
+  RateLimitMiddlewareOptions,
+} from './server/rate-limit';
+export {
+  RATE_LIMIT_DEFAULTS,
+  TokenBucketRateLimiter,
+  createRateLimitMiddleware,
+} from './server/rate-limit';
+
+export type {
+  WebhookEvent,
+  WebhookRegistration,
+  WebhookStore,
+  RegisterWebhookInput,
+  RegisterWebhookOptions,
+  FetchResponseLike,
+  FetchLike,
+  DeliverOptions,
+  DeliveryAttempt,
+  DeliveryResult,
+  DlqRecord,
+  DlqWriter,
+} from './server/webhooks';
+export {
+  WEBHOOK_EVENTS,
+  InMemoryWebhookStore,
+  registerWebhook,
+  signPayload,
+  verifySignature,
+  WebhookDispatcher,
+  WEBHOOK_HEADERS,
+  FileDlqWriter,
+  WebhookDispatcherWithDLQ,
+} from './server/webhooks';
+
+// ── v1 namespace ──────────────────────────────────────────────────────────────
+export * as v1 from './v1';
+
+// ── Network defaults ──────────────────────────────────────────────────────────
+import type { SorobanIdentityConfig } from './types';
+
 export const TESTNET_CONFIG: SorobanIdentityConfig = {
   rpcUrl: ['https://soroban-testnet.stellar.org', 'https://soroban-testnet-backup.stellar.org'],
   networkPassphrase: 'Test SDF Network ; September 2015',
@@ -120,7 +207,6 @@ export const TESTNET_CONFIG: SorobanIdentityConfig = {
   reputationId: '',
 };
 
-// Mainnet defaults — fill contract IDs after deployment
 export const MAINNET_CONFIG: SorobanIdentityConfig = {
   rpcUrl: ['https://soroban-mainnet.stellar.org', 'https://soroban-mainnet-backup.stellar.org'],
   networkPassphrase: 'Public Global Stellar Network ; September 2015',
@@ -128,5 +214,3 @@ export const MAINNET_CONFIG: SorobanIdentityConfig = {
   credentialManagerId: '',
   reputationId: '',
 };
-export type { FeeEstimate } from './types';
-export { SimulationError } from './types';

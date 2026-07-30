@@ -1,83 +1,3 @@
-export type SorobanErrorCode =
-  | "ALREADY_INITIALIZED"
-  | "ALREADY_EXISTS"
-  | "NOT_FOUND"
-  | "UNAUTHORIZED"
-  | "NOT_AN_ISSUER"
-  | "NOT_A_REPORTER"
-  | "CONTRACT_ERROR"
-  | "UNKNOWN";
-
-export class SorobanIdentityError extends Error {
-  code: SorobanErrorCode;
-  contractCode?: number;
-
-  constructor(message: string, code: SorobanErrorCode, contractCode?: number) {
-    super(message);
-    this.name = "SorobanIdentityError";
-    this.code = code;
-    this.contractCode = contractCode;
-  }
-}
-
-const IDENTITY_ERRORS: Record<number, { code: SorobanErrorCode; message: string }> = {
-  1: { code: "ALREADY_INITIALIZED", message: "Registry is already initialized" },
-  2: { code: "ALREADY_EXISTS", message: "DID already exists for this address" },
-  3: { code: "NOT_FOUND", message: "DID not found" },
-  4: { code: "UNAUTHORIZED", message: "Unauthorized operation" },
-};
-
-const CREDENTIAL_ERRORS: Record<number, { code: SorobanErrorCode; message: string }> = {
-  1: { code: "ALREADY_INITIALIZED", message: "Credential manager is already initialized" },
-  2: { code: "ALREADY_INITIALIZED", message: "Not initialized" },
-  3: { code: "NOT_FOUND", message: "Credential not found" },
-  4: { code: "UNAUTHORIZED", message: "Only the issuer can perform this action" },
-  5: { code: "NOT_AN_ISSUER", message: "Not a registered issuer" },
-};
-
-const REPUTATION_ERRORS: Record<number, { code: SorobanErrorCode; message: string }> = {
-  1: { code: "ALREADY_INITIALIZED", message: "Reputation contract is already initialized" },
-  2: { code: "ALREADY_INITIALIZED", message: "Not initialized" },
-  3: { code: "NOT_A_REPORTER", message: "Not a registered reporter" },
-};
-
-/**
- * Helper to parse raw Soroban simulation / tx errors into typed SorobanIdentityError.
- */
-export function parseContractError(
-  error: unknown,
-  contractType: "identity" | "credential" | "reputation"
-): SorobanIdentityError {
-  if (error instanceof SorobanIdentityError) {
-    return error;
-  }
-  const errStr = error instanceof Error ? error.message : String(error);
-
-  // Match pattern like Error(Contract, 3) or Error(Contract, #3)
-  const match =
-    errStr.match(/Error\(Contract,\s*#?(\d+)\)/i) ||
-    errStr.match(/contract error #?(\d+)/i);
-  if (match) {
-    const codeNum = parseInt(match[1], 10);
-    const map =
-      contractType === "identity"
-        ? IDENTITY_ERRORS
-        : contractType === "credential"
-        ? CREDENTIAL_ERRORS
-        : REPUTATION_ERRORS;
-
-    const mapped = map[codeNum];
-    if (mapped) {
-      return new SorobanIdentityError(mapped.message, mapped.code, codeNum);
-    }
-    return new SorobanIdentityError(
-      `Contract error #${codeNum}`,
-      "CONTRACT_ERROR",
-      codeNum
-    );
-  }
-
-  return new SorobanIdentityError(errStr, "UNKNOWN");
 /**
  * Discriminator for {@link SorobanIdentityError}. Callers can branch on
  * `err.code` to handle each class without parsing the message.
@@ -85,6 +5,7 @@ export function parseContractError(
  * - `NOT_FOUND` — record (DID, credential, reporter) does not exist
  * - `UNAUTHORIZED` — caller is not authorised for the requested operation
  * - `ALREADY_EXISTS` — creation conflicts; record already registered
+ * - `ALREADY_INITIALIZED` — contract initialization attempted twice
  * - `INVALID_INPUT` — caller-provided data failed schema/shape validation
  * - `INVALID_ADDRESS` — address fails Stellar ed25519 format validation
  * - `INVALID_PROOF` — presentation proof.jws signature is invalid or missing
@@ -99,12 +20,15 @@ export function parseContractError(
  * - `RATE_LIMITED` — rate limit exhaustion
  * - `TIMEOUT` — polling or overall operation timed out
  * - `VALIDATION_ERROR` — retained for backwards-compatibility
+ * - `NOT_AN_ISSUER` — address is not a registered issuer
+ * - `NOT_A_REPORTER` — address is not a registered reporter
  * - `UNKNOWN` — fallback when no other code fits
  */
 export type SorobanErrorCode =
   | "NOT_FOUND"
   | "UNAUTHORIZED"
   | "ALREADY_EXISTS"
+  | "ALREADY_INITIALIZED"
   | "INVALID_INPUT"
   | "INVALID_ADDRESS"
   | "INVALID_PROOF"
@@ -120,6 +44,10 @@ export type SorobanErrorCode =
   | "TIMEOUT"
   | "VALIDATION_ERROR"
   | "CLIENT_DISPOSED"
+  | "CLIENT_NOT_READY"
+  | "BATCH_TOO_LARGE"
+  | "NOT_AN_ISSUER"
+  | "NOT_A_REPORTER"
   | "UNKNOWN";
 
 export interface SorobanIdentityErrorInit {
@@ -163,10 +91,6 @@ export class SorobanIdentityError extends Error {
    *   `new SorobanIdentityError(msg, codeString, originalError)`.
    * Init-object signature:
    *   `new SorobanIdentityError(msg, { code, details, originalError, txHash })`.
-   *
-   * @param message       Human-readable error message.
-   * @param codeOrInit    {@link SorobanErrorCode} or init object. Defaults to `'UNKNOWN'`.
-   * @param originalError Optional wrapped error (positional form only).
    */
   constructor(
     message: string,
@@ -198,24 +122,9 @@ export class SorobanIdentityError extends Error {
 
 /**
  * Thrown when the RPC provider responds with HTTP 429 and the SDK has
- * exhausted its retry budget. Consumers should honour `retryAfterMs`
- * before re-submitting the request.
- *
- * @example
- * ```ts
- * import { RateLimitError } from '@soroban-identity/sdk';
- * try {
- *   await identity.resolveDid(address);
- * } catch (err) {
- *   if (err instanceof RateLimitError) {
- *     await sleep(err.retryAfterMs);
- *     // retry…
- *   }
- * }
- * ```
+ * exhausted its retry budget.
  */
 export class RateLimitError extends Error {
-  /** Milliseconds to wait before the next request attempt. */
   readonly retryAfterMs: number;
   readonly code: SorobanErrorCode = "RATE_LIMITED";
 
@@ -228,34 +137,16 @@ export class RateLimitError extends Error {
 
 /**
  * A typed contract-level error parsed from an RPC simulation failure.
- *
- * Use {@link ContractError.extract} to decode a `#N` marker out of an error
- * string and look up its human-readable description from a contract-specific
- * error map (e.g. `CREDENTIAL_MANAGER_ERRORS`).
  */
 export class ContractError extends Error {
-  /** The numeric error code returned by the contract. */
   readonly code: number;
 
-  /**
-   * @param code     Numeric contract error code.
-   * @param errorMap Map of code → human-readable description.
-   */
   constructor(code: number, errorMap: Record<number, string>) {
     super(errorMap[code] ?? `Contract error code ${code}`);
     this.name = "ContractError";
     this.code = code;
   }
 
-  /**
-   * Parse the first `#N` marker out of an error string and return a typed
-   * `ContractError`. Returns `null` when no marker is present (e.g. the error
-   * is a transport failure, not a contract-level abort).
-   *
-   * @param errMsg   The raw error string from a simulation failure.
-   * @param errorMap Contract-specific code → description map.
-   * @returns The decoded {@link ContractError}, or `null` if no marker found.
-   */
   static extract(errMsg: string, errorMap: Record<number, string>): ContractError | null {
     const match = errMsg.match(/#(\d+)/);
     if (!match) return null;
@@ -275,13 +166,7 @@ export class ContractError extends Error {
 
 /**
  * Thrown when a request is submitted to a {@link BaseClient} that has already
- * been disposed, or when `dispose()` drains all pending in-flight requests.
- *
- * @example
- * ```ts
- * client.dispose();
- * await pendingPromise; // rejects with ClientDisposedError
- * ```
+ * been disposed.
  */
 export class ClientDisposedError extends Error {
   readonly code = "CLIENT_DISPOSED" as const;
@@ -293,16 +178,11 @@ export class ClientDisposedError extends Error {
 }
 
 /**
- * Thrown by {@link CredentialClient.issueCredential} when a `schemaId` is
- * supplied and the provided `claims` fail validation against the on-chain
- * schema.
- *
- * `fieldErrors` maps each failing claim key to a human-readable message so
- * callers can surface actionable feedback.
+ * Thrown by {@link CredentialClient.issueCredential} when claims fail
+ * validation against the on-chain schema.
  */
 export class ClaimsValidationError extends Error {
   readonly code = "INVALID_INPUT" as const;
-  /** Per-field validation messages — key is the claim field path. */
   readonly fieldErrors: Record<string, string>;
 
   constructor(message: string, fieldErrors: Record<string, string>) {
@@ -313,9 +193,7 @@ export class ClaimsValidationError extends Error {
 }
 
 /**
- * Map a free-form error message (panic string, RPC error message,
- * etc.) to the envelope code. Falls back to `UNKNOWN` so call sites
- * can wrap-and-rethrow without case explosion.
+ * Map a free-form error message to the envelope code.
  */
 export function classifyError(message: string): SorobanErrorCode {
   const m = message.toLowerCase();
@@ -338,13 +216,67 @@ export function classifyError(message: string): SorobanErrorCode {
 }
 
 /**
- * Wrap any thrown value into a `SorobanIdentityError` with a code
- * derived from its message. Idempotent — already-wrapped errors
- * pass through.
+ * Wrap any thrown value into a `SorobanIdentityError`. Idempotent.
  */
 export function wrapError(err: unknown, fallbackMessage = "unexpected SDK error"): SorobanIdentityError {
   if (err instanceof SorobanIdentityError) return err;
   const message =
     err instanceof Error ? err.message : typeof err === "string" ? err : fallbackMessage;
   return new SorobanIdentityError(message, { code: classifyError(message), originalError: err });
+}
+
+const IDENTITY_CONTRACT_ERRORS: Record<number, { code: SorobanErrorCode; message: string }> = {
+  1: { code: "ALREADY_INITIALIZED", message: "Registry is already initialized" },
+  2: { code: "ALREADY_EXISTS", message: "DID already exists for this address" },
+  3: { code: "NOT_FOUND", message: "DID not found" },
+  4: { code: "UNAUTHORIZED", message: "Unauthorized operation" },
+};
+
+const CREDENTIAL_CONTRACT_ERRORS: Record<number, { code: SorobanErrorCode; message: string }> = {
+  1: { code: "ALREADY_INITIALIZED", message: "Credential manager is already initialized" },
+  2: { code: "ALREADY_INITIALIZED", message: "Not initialized" },
+  3: { code: "NOT_FOUND", message: "Credential not found" },
+  4: { code: "UNAUTHORIZED", message: "Only the issuer can perform this action" },
+  5: { code: "NOT_AN_ISSUER", message: "Not a registered issuer" },
+};
+
+const REPUTATION_CONTRACT_ERRORS: Record<number, { code: SorobanErrorCode; message: string }> = {
+  1: { code: "ALREADY_INITIALIZED", message: "Reputation contract is already initialized" },
+  2: { code: "ALREADY_INITIALIZED", message: "Not initialized" },
+  3: { code: "NOT_A_REPORTER", message: "Not a registered reporter" },
+};
+
+/**
+ * Parse a raw Soroban simulation / tx error into a typed SorobanIdentityError.
+ */
+export function parseContractError(
+  error: unknown,
+  contractType: "identity" | "credential" | "reputation"
+): SorobanIdentityError {
+  if (error instanceof SorobanIdentityError) return error;
+  const errStr = error instanceof Error ? error.message : String(error);
+
+  const match =
+    errStr.match(/Error\(Contract,\s*#?(\d+)\)/i) ||
+    errStr.match(/contract error #?(\d+)/i);
+  if (match) {
+    const codeNum = parseInt(match[1], 10);
+    const map =
+      contractType === "identity"
+        ? IDENTITY_CONTRACT_ERRORS
+        : contractType === "credential"
+        ? CREDENTIAL_CONTRACT_ERRORS
+        : REPUTATION_CONTRACT_ERRORS;
+
+    const mapped = map[codeNum];
+    if (mapped) {
+      return new SorobanIdentityError(mapped.message, { code: mapped.code, details: { contractCode: codeNum } });
+    }
+    return new SorobanIdentityError(
+      `Contract error #${codeNum}`,
+      { code: "CONTRACT_ERROR", details: { contractCode: codeNum } }
+    );
+  }
+
+  return new SorobanIdentityError(errStr, { code: classifyError(errStr), originalError: error });
 }
