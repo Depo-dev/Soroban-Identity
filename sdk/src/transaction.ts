@@ -6,16 +6,49 @@ export interface TxOptions {
   pollRetries?: number;
 }
 
+function isNetworkError(err: unknown): boolean {
+  const msg = (err instanceof Error ? err.message : String(err)).toLowerCase();
+  return /econnrefused|enotfound|fetch failed|econnreset|etimedout/.test(msg);
+}
+
+function getRpcUrl(server: SorobanRpc.Server): string {
+  return (server as unknown as { serverURL: string }).serverURL ?? "unknown";
+}
+
 export async function executeTransaction(
   server: SorobanRpc.Server,
   tx: Transaction,
   signer: (tx: Transaction) => void,
   options?: TxOptions
 ): Promise<SorobanRpc.Api.GetSuccessfulTransactionResponse> {
-  const prepared = await server.prepareTransaction(tx);
-  signer(prepared as Transaction);
+  let prepared: Transaction;
+  try {
+    prepared = (await server.prepareTransaction(tx)) as Transaction;
+  } catch (e) {
+    if (isNetworkError(e)) {
+      throw new SorobanIdentityError(
+        `Cannot reach RPC endpoint: ${getRpcUrl(server)}`,
+        { code: "NETWORK_ERROR", details: { cause: e } }
+      );
+    }
+    throw e;
+  }
 
-  const result = await server.sendTransaction(prepared);
+  signer(prepared);
+
+  let result: SorobanRpc.Api.SendTransactionResponse;
+  try {
+    result = await server.sendTransaction(prepared);
+  } catch (e) {
+    if (isNetworkError(e)) {
+      throw new SorobanIdentityError(
+        `Cannot reach RPC endpoint: ${getRpcUrl(server)}`,
+        { code: "NETWORK_ERROR", details: { cause: e } }
+      );
+    }
+    throw e;
+  }
+
   if (result.status !== "PENDING") {
     throw new Error(`Transaction failed: ${result.status}`);
   }
@@ -25,7 +58,18 @@ export async function executeTransaction(
 
   for (let i = 0; i < retries; i++) {
     await new Promise((r) => setTimeout(r, interval));
-    const status = await server.getTransaction(result.hash);
+    let status: SorobanRpc.Api.GetTransactionResponse;
+    try {
+      status = await server.getTransaction(result.hash);
+    } catch (e) {
+      if (isNetworkError(e)) {
+        throw new SorobanIdentityError(
+          `Cannot reach RPC endpoint: ${getRpcUrl(server)}`,
+          { code: "NETWORK_ERROR", details: { cause: e } }
+        );
+      }
+      throw e;
+    }
     if (status.status === SorobanRpc.Api.GetTransactionStatus.SUCCESS) {
       return status as SorobanRpc.Api.GetSuccessfulTransactionResponse;
     }

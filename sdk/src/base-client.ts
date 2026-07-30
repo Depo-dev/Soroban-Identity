@@ -185,6 +185,9 @@ export abstract class BaseClient {
           if (
             !errorStr.includes("ECONNRESET") &&
             !errorStr.includes("ETIMEDOUT") &&
+            !errorStr.includes("ECONNREFUSED") &&
+            !errorStr.includes("ENOTFOUND") &&
+            !errorStr.includes("fetch failed") &&
             !errorStr.includes("503") &&
             !errorStr.includes("502") &&
             !errorStr.includes("504")
@@ -194,6 +197,17 @@ export abstract class BaseClient {
         }
       }
 
+      const lastErrStr = lastError?.toString() ?? String(lastError);
+      if (/econnrefused|enotfound|fetch failed|econnreset|etimedout/i.test(lastErrStr)) {
+        const rpcUrls = (Array.isArray(this.config.rpcUrl)
+          ? this.config.rpcUrl
+          : [this.config.rpcUrl]
+        ).join(", ");
+        throw new SorobanIdentityError(
+          `Cannot reach RPC endpoint: ${rpcUrls}`,
+          { code: "NETWORK_ERROR", details: { cause: lastError } }
+        );
+      }
       throw lastError;
     });
   }
