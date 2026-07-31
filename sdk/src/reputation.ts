@@ -233,14 +233,20 @@ export class ReputationClient extends BaseClient {
    * {@link ReputationClient.listScoreHistory} for new code — it returns a
    * `nextCursor` instead of forcing callers to track offsets.
    *
-   * @param callerAddress   Stellar address used to build the read simulation.
-   * @param subjectAddress  The subject whose history is being queried.
-   * @param reporterAddress The reporter whose submissions to retrieve.
-   * @param offset          Number of entries to skip. Defaults to `0`.
-   * @param limit           Maximum entries to return. Defaults to `20`,
-   *                        clamped to `100` server-side.
-   * @param options         Per-call overrides (currently `timeoutSeconds`).
-   * @returns Array of {@link ScoreHistoryEntry}.
+   * @param callerAddress    Stellar address used to build the read simulation.
+   * @param subjectAddress   The subject whose history is being queried.
+   * @param reporterAddress  The reporter whose submissions to retrieve.
+   * @param offset           Number of entries to skip. Defaults to `0`.
+   * @param limit            Maximum entries to return. Defaults to `20`,
+   *                         clamped to `100` server-side.
+   * @param fromTimestamp    Optional minimum timestamp (Unix seconds). Only
+   *                         entries with `submitted_at >= fromTimestamp` are
+   *                         returned. Omit to include all entries.
+   * @param toTimestamp      Optional maximum timestamp (Unix seconds). Only
+   *                         entries with `submitted_at <= toTimestamp` are
+   *                         returned. Omit to include all entries.
+   * @param options          Per-call overrides (currently `timeoutSeconds`).
+   * @returns Array of {@link ScoreHistoryEntry} matching the filters.
    * @throws {SorobanIdentityError} on simulation failure (including
    *   `ReporterNotFound` when the reporter is not registered).
    */
@@ -250,6 +256,8 @@ export class ReputationClient extends BaseClient {
     reporterAddress: string,
     offset = 0,
     limit = 20,
+    fromTimestamp?: number,
+    toTimestamp?: number,
     options?: CallOptions
   ): Promise<ScoreHistoryEntry[]> {
     validateStellarAddress(callerAddress);
@@ -270,6 +278,8 @@ export class ReputationClient extends BaseClient {
             reporter: reporterAddress,
             offset,
             limit,
+            fromTimestamp,
+            toTimestamp,
           })
         )
       )

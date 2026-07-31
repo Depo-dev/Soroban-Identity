@@ -1,0 +1,78 @@
+name: Integration Tests
+
+on:
+  schedule:
+    # Run nightly at 2 AM UTC
+    - cron: '0 2 * * *'
+  workflow_dispatch: # Allow manual trigger
+
+jobs:
+  integration:
+    name: SDK Integration Tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node.js 18
+        uses: actions/setup-node@v4
+        with:
+          node-version: 18
+          cache: npm
+          cache-dependency-path: sdk/package-lock.json
+
+      - name: Install SDK dependencies
+        working-directory: sdk
+        run: npm ci
+
+      - name: Build SDK
+        working-directory: sdk
+        run: npm run build
+
+      - name: Install Stellar CLI
+        run: |
+          curl -L https://github.com/stellar/stellar-cli/releases/latest/download/stellar-cli-x86_64-unknown-linux-gnu.tar.gz | tar xz
+          sudo mv stellar /usr/local/bin/
+          stellar version
+
+      - name: Pull stellar/quickstart Docker image
+        run: docker pull stellar/quickstart:testing
+
+      - name: Run integration tests
+        working-directory: sdk
+        run: npm run test:integration
+        env:
+          CI: true
+
+      - name: Cleanup Docker containers
+        if: always()
+        run: |
+          docker ps -a --filter name=soroban-identity-integration-test --format "{{.ID}}" | xargs -r docker rm -f
+
+      - name: Upload test results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: integration-test-results
+          path: sdk/test-results/
+          retention-days: 30
+
+      - name: Notify on failure
+        if: failure()
+        uses: actions/github-script@v7
+        with:
+          script: |
+            github.rest.issues.create({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              title: '🚨 Nightly integration tests failed',
+              body: `Integration tests failed in the nightly run.
+              
+              **Workflow**: ${{ github.workflow }}
+              **Run**: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+              **Commit**: ${{ github.sha }}
+              
+              Please investigate and fix the failing tests.`,
+              labels: ['integration-tests', 'ci-failure']
+            })

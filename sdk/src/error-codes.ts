@@ -18,6 +18,7 @@
  * - `LEDGER_CLOSED` — ledger closed before the transaction was included
  * - `RATE_LIMITED` — request rate limit exhausted
  * - `TIMEOUT` — polling or overall operation timed out
+ * - `BATCH_TOO_LARGE` — more than 50 credential IDs passed to revokeBatch
  * - `VALIDATION_ERROR` — retained for backwards-compatibility
  * - `UNKNOWN` — fallback when no other code fits
  */
@@ -39,6 +40,7 @@ export const SorobanErrorCodes = {
   RATE_LIMITED: "RATE_LIMITED",
   TIMEOUT: "TIMEOUT",
   VALIDATION_ERROR: "VALIDATION_ERROR",
+  BATCH_TOO_LARGE: "BATCH_TOO_LARGE",
   UNKNOWN: "UNKNOWN",
 } as const;
 
@@ -62,6 +64,7 @@ export const CREDENTIAL_MANAGER_ERRORS: Record<number, string> = {
   7: 'Unauthorized: caller is not the admin',
   8: 'Maximum number of issuers reached',
   9: 'Credential is expired',
+  15: 'Batch size exceeds maximum of 50',
 };
 
 export const REPUTATION_ERRORS: Record<number, string> = {

@@ -25,7 +25,8 @@ Manages DID documents on-chain.
 | Function | Description |
 |---|---|
 | `initialize(admin)` | One-time setup |
-| `transfer_admin(current_admin, new_admin)` | Transfer admin rights (current admin only) |
+| `propose_admin(current_admin, proposed_admin)` | Step 1: propose a new admin (current admin only) |
+| `accept_admin(new_admin)` | Step 2: accept a pending admin proposal (proposed admin only) |
 | `create_did(controller, metadata)` | Mint a new DID |
 | `update_did(controller, metadata)` | Update metadata |
 | `deactivate_did(controller)` | Soft-delete a DID |
@@ -34,7 +35,7 @@ Manages DID documents on-chain.
 
 ### credential-manager
 
-Issues and verifies verifiable credentials. A maximum of **100 issuers** (`MAX_ISSUERS`) can be registered at any time; `add_issuer` panics with `MaxIssuersReached` if the cap is hit.
+Issues and verifies verifiable credentials. A maximum of **100 issuers** (`MAX_ISSUERS`) can be registered at any time by default; `add_issuer` returns `MaxIssuersReached` if the cap is hit. The admin can raise or lower this cap via `set_max_issuers`, up to a hard ceiling of **500 issuers** (`ABSOLUTE_MAX_ISSUERS`).
 
 | Function | Description |
 |---|---|
@@ -42,6 +43,7 @@ Issues and verifies verifiable credentials. A maximum of **100 issuers** (`MAX_I
 | `transfer_admin(current_admin, new_admin)` | Transfer admin rights (current admin only) |
 | `add_issuer(issuer)` | Register a trusted issuer (admin) |
 | `remove_issuer(issuer)` | Remove an issuer (admin) |
+| `set_max_issuers(admin, new_max)` | Raise or lower the issuer cap, up to `ABSOLUTE_MAX_ISSUERS` (admin) |
 | `issue_credential(issuer, subject, type, claims, claims_hash, sig, expires)` | Issue a credential |
 | `revoke_credential(issuer, id)` | Revoke a credential |
 | `verify_credential(id)` | Check validity |
@@ -75,6 +77,54 @@ Issuer                Subject               Verifier
   │                     │                      │── verify_credential
   │                     │                      │◀─ true / false
 ```
+
+## Credential Lifecycle
+
+Every credential moves through these states. All transitions are permanent except the implicit re-issuance path for a previously revoked credential.
+
+```mermaid
+stateDiagram-v2
+    [*] --> ACTIVE : issue_credential(issuer, subject, ...)\n[actor: registered issuer]
+
+    ACTIVE --> REVOKED : revoke_credential(issuer, credential_id)\n[actor: issuing issuer]
+    ACTIVE --> EXPIRED : expire_credential(caller, credential_id)\n[actor: any caller, after expires_at]
+    ACTIVE --> ACTIVE : verify_credential(credential_id)\n[actor: any — extends TTL]
+
+    REVOKED --> ACTIVE : issue_credential(issuer, subject, ...)\n[actor: registered issuer — re-issues after revocation]
+
+    EXPIRED --> [*] : terminal — storage TTL winds down to TTL_MIN
+    REVOKED --> [*] : terminal — storage retained until ledger expiry
+```
+
+**Notes:**
+- `expires_at = 0` means the credential never expires; only `revoke_credential` can terminate it.
+- `expire_credential` is a permissionless sweep — any address can call it once the ledger timestamp exceeds `expires_at`.
+- Re-issuance after revocation creates a new credential with a fresh `issued_at`; the revoked record remains in storage.
+- `verify_credential` is read-only but bumps the persistent-storage TTL to keep the record alive.
+
+## DID Lifecycle
+
+A DID document is owned by its `controller` (the Stellar wallet that created it). Only the admin can reactivate a deactivated DID.
+
+```mermaid
+stateDiagram-v2
+    [*] --> ACTIVE : create_did(controller, metadata)\n[actor: controller]
+
+    ACTIVE --> ACTIVE : update_did(controller, metadata)\n[actor: controller — updates metadata + updated_at]
+    ACTIVE --> ACTIVE : add_service(controller, service)\n[actor: controller — appends service endpoint]
+    ACTIVE --> ACTIVE : remove_service(controller, service_id)\n[actor: controller — removes service endpoint]
+    ACTIVE --> DEACTIVATED : deactivate_did(controller)\n[actor: controller]
+
+    DEACTIVATED --> ACTIVE : reactivate_did(admin, controller)\n[actor: admin only]
+    DEACTIVATED --> DEACTIVATED : did_exists(controller) → true\n[read-only — DID record is retained]
+```
+
+**Notes:**
+- `resolve_did` and `has_active_did` are read-only and only succeed on `ACTIVE` DIDs.
+- `did_exists` returns `true` for both `ACTIVE` and `DEACTIVATED` states — it checks presence without deserialising the document.
+- Deactivation decrements the active DID counter; reactivation increments it.
+- Service endpoints (`add_service` / `remove_service`) are only permitted on `ACTIVE` DIDs; attempting either on a `DEACTIVATED` DID returns `DidDeactivated`.
+- A controller address can only hold one DID. `create_did` returns `DidAlreadyExists` if a document already exists for the address.
 
 ## Cross-Contract Calls & Reentrancy (Issue #551)
 

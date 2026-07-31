@@ -130,6 +130,7 @@ export default function WalletButton() {
             disabled={txLoading}
             aria-haspopup="menu"
             aria-expanded={showDropdown}
+            aria-label={`Wallet account ${short(publicKey)}`}
             style={{
               display: "flex",
               alignItems: "center",
@@ -252,6 +253,7 @@ export default function WalletButton() {
 
               <button
                 role="menuitem"
+                aria-label={`Disconnect wallet ${short(publicKey)}`}
                 onClick={() => {
                   disconnect();
                   setShowDropdown(false);
@@ -300,6 +302,7 @@ export default function WalletButton() {
           <button
             onClick={() => setShowPicker((v) => !v)}
             disabled={connecting}
+            aria-label="Connect Freighter wallet"
           >
             {connecting ? "Connecting…" : "Connect Wallet"}
           </button>
@@ -349,7 +352,7 @@ export default function WalletButton() {
       )}
 
       {error && (
-        <span style={{ fontSize: "0.75rem", color: "var(--error-text)" }}>
+        <span role="status" aria-live="polite" style={{ fontSize: "0.75rem", color: "var(--error-text)" }}>
           {(() => {
             const msg =
               error instanceof Error

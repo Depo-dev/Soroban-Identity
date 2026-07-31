@@ -1,4 +1,5 @@
 #![no_std]
+#![deny(clippy::all)]
 //! # soroban-identity-interface
 //!
 //! Stable Rust trait ABI for the three Soroban Identity contracts

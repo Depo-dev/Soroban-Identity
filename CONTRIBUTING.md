@@ -1,131 +1,251 @@
 # Contributing to Soroban Identity
 
-Thanks for your interest in contributing. Here's everything you need to get started.
+Thanks for taking the time to contribute. This guide covers everything you need to go from zero to a merged PR.
 
-## Fork & Clone
+## Code of Conduct
+
+This project follows the [Contributor Covenant Code of Conduct](https://www.contributor-covenant.org/version/2/1/code_of_conduct/).
+By participating you agree to uphold it. Report unacceptable behaviour to the maintainers via a GitHub Discussion.
+
+---
+
+## Prerequisites
+
+Install these before anything else. The versions listed are what CI uses — mismatches are the most common source of local failures.
+
+| Tool | Version | Install |
+|---|---|---|
+| Rust | stable (≥ 1.78) | [rustup.rs](https://rustup.rs/) |
+| `wasm32-unknown-unknown` target | — | `rustup target add wasm32-unknown-unknown` |
+| `rustfmt` + `clippy` | bundled with stable | `rustup component add rustfmt clippy` |
+| Stellar CLI | ≥ 21.0.0 | [Stellar CLI docs](https://developers.stellar.org/docs/tools/developer-tools/cli/stellar-cli) |
+| Node.js | 18 LTS | [nodejs.org](https://nodejs.org/) |
+| npm | ≥ 9 (bundled with Node 18) | — |
+
+Verify your setup:
 
 ```bash
-git clone https://github.com/your-username/Soroban-Identity.git
-cd Soroban-Identity
+rustc --version          # rustc 1.xx.x (...)
+cargo fmt --version      # rustfmt x.x.x-stable
+cargo clippy --version   # clippy x.x.x (...)
+stellar --version        # stellar x.x.x
+node --version           # v18.x.x
+npm --version            # 9.x.x or 10.x.x
 ```
 
-## Branch Naming
-
-Use one of these prefixes:
-
-- `feat/` — new features
-- `fix/` — bug fixes
-- `docs/` — documentation only
-
-Example: `feat/credential-filter-ui`
-
-## Commit Messages
-
-We follow [Conventional Commits](https://www.conventionalcommits.org/):
-
-```
-feat: add credential type filter to CredentialsPanel
-fix: handle deploy.sh exit codes
-docs: update README quick start
-```
+---
 
 ## Local Setup
 
-### Contracts (Rust)
+### 1. Fork and clone
 
 ```bash
-rustup target add wasm32-unknown-unknown
-cd contracts && cargo build --target wasm32-unknown-unknown --release
-cargo test
+git clone https://github.com/<your-username>/Soroban-Identity.git
+cd Soroban-Identity
 ```
 
-### SDK (TypeScript)
+### 2. Build the Soroban contracts
+
+```bash
+cd contracts
+cargo build --target wasm32-unknown-unknown --release
+```
+
+### 3. Install and build the TypeScript SDK
 
 ```bash
 cd sdk
-npm install
+npm ci
 npm run build
-npm test
 ```
 
-### Frontend (React + Vite)
+### 4. Install the frontend
 
 ```bash
 cd frontend
-npm install
-npm run dev
+npm ci
 ```
 
-### Deploy to Testnet
+### 5. Configure the frontend environment
 
 ```bash
-export STELLAR_SECRET_KEY=S...
-bash scripts/deploy.sh
+cp frontend/.env.example frontend/.env
+# Edit frontend/.env and fill in contract IDs after deployment
 ```
 
-## PR Checklist
+### 6. (Optional) Run the server locally
 
-Before opening a PR:
-
-- [ ] Branch is named with the correct prefix
-- [ ] Commits follow Conventional Commits format
-- [ ] SDK tests pass (`npm test` in `sdk/`)
-- [ ] No TypeScript errors (`npx tsc --noEmit` in `frontend/`)
-- [ ] **SDK changes**: Update the `[Unreleased]` section in `sdk/CHANGELOG.md`
-- [ ] PR description references the related issue (e.g. `Closes #17`)
-
-## Linking a PR to an Issue
-
-Include one of these in your PR description:
-
-```
-Closes #17
-Fixes #18
-Resolves #19
+```bash
+cd server
+cp .env.example .env
+npm ci
+npm start
 ```
 
-GitHub will automatically close the issue when the PR is merged.
+---
 
-## Questions?
+## Running Tests
 
-Open a [Discussion](../../discussions) or comment on the relevant issue.
+Run all test suites before opening a PR. Every suite must pass locally.
 
+### Contracts
+
+```bash
+# Run all contract unit tests
+cd contracts
+cargo test
+
+# Run tests for a specific contract
+cd contracts/identity-registry
+cargo test
+
+cd contracts/credential-manager
+cargo test
+
+cd contracts/reputation
+cargo test
+```
+
+### Lint and format check (contracts)
+
+```bash
+cd contracts
+cargo fmt --check      # must produce no diff
+cargo clippy --all-targets --all-features -- -D warnings   # must produce no warnings
+```
+
+### SDK
+
+```bash
+cd sdk
+npm run lint           # ESLint — must exit 0
+npm run format:check   # Prettier — must produce no diff
+npm run type-check     # TypeScript — must produce no errors
+npm test               # Vitest unit tests
+```
+
+### Frontend
+
+```bash
+cd frontend
+npm run lint           # ESLint + react-hooks plugin — must exit 0
+npm run format:check   # Prettier — must produce no diff
+npx tsc --noEmit       # TypeScript — must produce no errors
+npm test               # Vitest unit tests
+node scripts/validate-locales.js   # i18n key sync check
+```
+
+### Server
+
+```bash
+cd server
+node --test            # Node built-in test runner
+```
+
+---
+
+## Branch Naming
+
+Branch names must use one of these prefixes followed by a short slug:
+
+| Prefix | When to use |
+|---|---|
+| `feat/` | New feature or enhancement |
+| `fix/` | Bug fix |
+| `docs/` | Documentation only |
+| `devops/` | CI, tooling, build scripts |
+| `refactor/` | Code restructure with no behaviour change |
+| `test/` | Adding or fixing tests only |
+
+Examples:
+
+```
+feat/credential-type-filter
+fix/expire-credential-ttl
+docs/architecture-diagrams
+devops/eslint-frontend
+```
+
+---
+
+## Commit Messages
+
+We follow [Conventional Commits](https://www.conventionalcommits.org/en/v1.0.0/).
+
+```
+<type>(<scope>): <short summary>
+
+[optional body]
+
+[optional footer: Closes #N]
+```
+
+**Types:** `feat`, `fix`, `docs`, `devops`, `refactor`, `test`, `chore`
+
+**Scope:** the affected package or area, e.g. `credential-manager`, `sdk`, `frontend`, `ci`
+
+Examples:
+
+```
+feat(credential-manager): add expire_credential permissionless sweep
+fix(identity-registry): replace expect/panic with typed errors in transfer_admin
+docs(architecture): add Mermaid lifecycle state diagrams
+devops(ci): add clippy and fmt gate to contracts CI
+```
+
+Keep the summary line under 72 characters. Use the body for the *why*, not the *what*.
+
+---
+
+## PR Process
+
+1. **Open an issue first** (or find an existing one) — every PR should reference an issue.
+2. **Create your branch** from `main` using the naming convention above.
+3. **Make your changes** and ensure all test suites pass locally.
+4. **Update the changelog** — if your change affects the SDK, add an entry to the `[Unreleased]` section in `sdk/CHANGELOG.md`.
+5. **Open the PR** against `main` and fill in the template:
+   - Link the issue: `Closes #N` (GitHub auto-closes the issue on merge)
+   - Describe *what* changed and *why*
+   - Note any migration steps or breaking changes
+6. **Address review feedback** — at least one maintainer approval is required before merge.
+7. **Squash or rebase** if requested to keep the commit history clean.
+
+### PR checklist
+
+Before requesting review, confirm:
+
+- [ ] All contract tests pass: `cargo test` in `contracts/`
+- [ ] Clippy is clean: `cargo clippy --all-targets --all-features -- -D warnings`
+- [ ] Rust formatting is clean: `cargo fmt --check`
+- [ ] SDK lint is clean: `npm run lint` in `sdk/`
+- [ ] SDK format is clean: `npm run format:check` in `sdk/`
+- [ ] SDK tests pass: `npm test` in `sdk/`
+- [ ] Frontend lint is clean: `npm run lint` in `frontend/`
+- [ ] Frontend type check passes: `npx tsc --noEmit` in `frontend/`
+- [ ] i18n keys are in sync: `node scripts/validate-locales.js` in `frontend/`
+- [ ] PR description references the related issue (`Closes #N`)
+- [ ] `sdk/CHANGELOG.md` updated (SDK changes only)
+- [ ] No secrets or `.env` files committed
+
+---
 
 ## Internationalization (i18n)
 
-### Locale Validation
+The English locale file `frontend/src/locales/en.json` is the source of truth. All other locale files must stay in sync with it.
 
-We have a locale validation script that ensures all translation files are in sync with the English locale (`en.json`), which serves as the source of truth.
+When adding new UI text:
 
-To run the validation:
+1. Add the key and English string to `en.json` first.
+2. Add the same key and translated string to every other locale file.
+3. Run the validation script to confirm no keys are missing:
 
 ```bash
 cd frontend
 node scripts/validate-locales.js
 ```
 
-This script:
-1. Compares all locale files against `en.json`
-2. Reports any missing translation keys
-3. Fails with a non-zero exit code if keys are missing
+---
 
-### Why Validation Exists
+## Questions?
 
-The validation script ensures:
-- Consistent user experience across all languages
-- No missing translation keys that would expose raw key names in production
-- Automatic fallback to English for any missing translations
-- Development warnings when keys are missing (development builds only)
-
-### Adding New Translations
-
-1. Always add new keys to `en.json` first
-2. Then add the corresponding translations to other locale files
-3. Run the validation script to ensure all locales are in sync
-
-### Fallback Behavior
-
-The i18n configuration is set up to:
-- Fall back to English (`en`) when a translation key is missing
-- Show development warnings for missing keys (development builds only)
-- Silently fall back in production builds (no warnings)
+Open a [GitHub Discussion](../../discussions) or leave a comment on the relevant issue. Do not open a blank PR to ask questions.
