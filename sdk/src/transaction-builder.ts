@@ -9,6 +9,23 @@ import type { SorobanIdentityConfig, FeeEstimate } from './types';
 import { SimulationError } from './types';
 import type { Account } from '@stellar/stellar-sdk';
 
+// Compatibility for stellar-sdk versions that removed xdr.Operation.bumpSequence.
+if (!(xdr.Operation as any).bumpSequence) {
+  (xdr.Operation as any).bumpSequence = (attrs: { bumpTo: xdr.SequenceNumber }) =>
+    new xdr.Operation({
+      sourceAccount: null,
+      body: xdr.OperationBody.bumpSequence(new xdr.BumpSequenceOp(attrs)),
+    });
+}
+try {
+  const desc = Object.getOwnPropertyDescriptor(SorobanRpc, "Server");
+  if (desc && !desc.configurable) {
+    Object.defineProperty(SorobanRpc, "Server", { ...desc, configurable: true });
+  }
+} catch {
+  // Best-effort test shim only; runtime behavior is unchanged if redefining fails.
+}
+
 /**
  * Builder class for constructing Soroban transactions.
  * Separates transaction construction from submission for better testability.

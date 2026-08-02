@@ -45,6 +45,7 @@ const RATE_LIMIT: Symbol = symbol_short!("rl");
 const DISPUTE: Symbol = symbol_short!("dispute");
 /// Global dispute ID counter.
 const DISPUTE_CNT: Symbol = symbol_short!("disp_cnt");
+const PAUSED: Symbol = symbol_short!("PAUSED");
 /// Storage key for the configurable rate-limit window (in ledgers).
 const MIN_INTERVAL_KEY: Symbol = symbol_short!("rl_win");
 
@@ -67,6 +68,7 @@ pub enum ContractError {
     DisputeAlreadyResolved = 12,
     DisputeAlreadyOpen     = 13,
     InvalidMinInterval     = 14,
+    ContractPaused         = 15,
 }
 
 // ── Data types ────────────────────────────────────────────────────────────────
@@ -294,6 +296,24 @@ impl Reputation {
         Ok(())
     }
 
+    pub fn pause(env: Env) -> Result<(), ContractError> {
+        Self::require_admin(&env)?;
+        env.storage().instance().set(&PAUSED, &true);
+        env.events().publish((symbol_short!("contract"), symbol_short!("paused")), EVENT_VERSION);
+        Ok(())
+    }
+
+    pub fn unpause(env: Env) -> Result<(), ContractError> {
+        Self::require_admin(&env)?;
+        env.storage().instance().set(&PAUSED, &false);
+        env.events().publish((symbol_short!("contract"), symbol_short!("unpaused")), EVENT_VERSION);
+        Ok(())
+    }
+
+    pub fn is_paused(env: Env) -> bool {
+        env.storage().instance().get(&PAUSED).unwrap_or(false)
+    }
+
     pub fn add_reporter(env: Env, reporter: Address) -> Result<(), ContractError> {
         Self::require_admin(&env)?;
         let mut reporters = Self::get_reporters(&env);
@@ -361,6 +381,7 @@ impl Reputation {
         reason: soroban_sdk::String,
     ) -> Result<(), ContractError> {
         reporter.require_auth();
+        Self::require_not_paused(&env)?;
         Self::require_reporter(&env, &reporter)?;
         if reason.len() > 256 {
             return Err(ContractError::ReasonTooLong);
@@ -523,6 +544,7 @@ impl Reputation {
         delta_index: u32,
     ) -> Result<u32, ContractError> {
         subject.require_auth();
+        Self::require_not_paused(&env)?;
         if !Self::get_reporters(&env).contains(&reporter) {
             return Err(ContractError::ReporterNotFound);
         }
@@ -839,6 +861,13 @@ impl Reputation {
     fn require_reporter(env: &Env, reporter: &Address) -> Result<(), ContractError> {
         if !Self::get_reporters(env).contains(reporter) {
             return Err(ContractError::ReporterNotFound);
+        }
+        Ok(())
+    }
+
+    fn require_not_paused(env: &Env) -> Result<(), ContractError> {
+        if env.storage().instance().get(&PAUSED).unwrap_or(false) {
+            return Err(ContractError::ContractPaused);
         }
         Ok(())
     }
@@ -1281,5 +1310,33 @@ mod tests {
                 assert_ne!(left, right);
             }
         }
+    }
+
+    #[test]
+    fn test_pause_blocks_submit_allows_reads() {
+        let (env, _admin, client) = setup();
+        let reporter = Address::generate(&env);
+        let subject = Address::generate(&env);
+        client.add_reporter(&reporter);
+        let reason = String::from_str(&env, "completed KYC");
+        client.submit_score(&reporter, &subject, &50, &reason);
+
+        assert!(!client.is_paused());
+        client.pause();
+        assert!(client.is_paused());
+
+        env.ledger().with_mut(|li| li.sequence_number += 101);
+        assert_eq!(
+            client.try_submit_score(&reporter, &subject, &25, &reason),
+            Err(Ok(ContractError::ContractPaused))
+        );
+
+        let rec = client.get_reputation(&subject);
+        assert_eq!(rec.score, 50);
+
+        client.unpause();
+        assert!(!client.is_paused());
+        client.submit_score(&reporter, &subject, &25, &reason);
+        assert_eq!(client.get_reputation(&subject).score, 75);
     }
 }

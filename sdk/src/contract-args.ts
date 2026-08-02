@@ -121,6 +121,7 @@ export function buildIssueCredentialArgs(params: {
   signature: Buffer;
   expiresAt: bigint;
 }): xdr.ScVal[] {
+  const expiresAt = encodeU64(params.expiresAt);
   return [
     nativeToScVal(params.issuer, { type: 'address' }),
     nativeToScVal(params.subject, { type: 'address' }),
@@ -128,7 +129,7 @@ export function buildIssueCredentialArgs(params: {
     nativeToScVal(params.claims, { type: 'map' }),
     nativeToScVal(params.claimsHash, { type: 'bytes' }),
     nativeToScVal(params.signature, { type: 'bytes' }),
-    encodeU64(params.expiresAt),
+    expiresAt,
   ];
 }
 
@@ -166,6 +167,27 @@ export function buildRevokeBatchArgs(params: {
     nativeToScVal(params.issuer, { type: 'address' }),
     xdr.ScVal.scvVec(params.credentialIds.map((id) => nativeToScVal(id, { type: 'bytes' }))),
     nativeToScVal(params.reason, { type: 'symbol' }),
+  ];
+}
+
+/**
+ * Build args for `renew_credential(issuer, credential_id, new_expires_at)`.
+ *
+ * @param params.issuer       Registered issuer address (must sign the tx).
+ * @param params.credentialId 32-byte credential ID buffer.
+ * @param params.newExpiresAt New expiry as a Unix timestamp in **seconds**. Must be
+ *                            strictly later than the credential's current expiry.
+ * @returns ScVal array ready for `contract.call('renew_credential', ...)`.
+ */
+export function buildRenewCredentialArgs(params: {
+  issuer: string;
+  credentialId: Buffer;
+  newExpiresAt: number;
+}): xdr.ScVal[] {
+  return [
+    nativeToScVal(params.issuer, { type: 'address' }),
+    nativeToScVal(params.credentialId, { type: 'bytes' }),
+    nativeToScVal(params.newExpiresAt, { type: 'u64' }),
   ];
 }
 
@@ -298,6 +320,24 @@ export function buildListIssuerCredentialsArgs(params: {
     nativeToScVal(params.issuer, { type: 'address' }),
     params.cursor,
     nativeToScVal(params.limit, { type: 'u32' }),
+  ];
+}
+
+
+/**
+ * Build args for `get_revocations(issuer, subject)`.
+ *
+ * @param params.issuer  Issuer address in the revocation pair.
+ * @param params.subject Subject address in the revocation pair.
+ * @returns ScVal array ready for `contract.call('get_revocations', ...)`.
+ */
+export function buildGetRevocationsArgs(params: {
+  issuer: string;
+  subject: string;
+}): xdr.ScVal[] {
+  return [
+    nativeToScVal(params.issuer, { type: 'address' }),
+    nativeToScVal(params.subject, { type: 'address' }),
   ];
 }
 

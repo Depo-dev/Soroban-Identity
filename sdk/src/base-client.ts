@@ -1,9 +1,6 @@
-import { SorobanRpc, Contract } from "@stellar/stellar-sdk";
-import type { SorobanIdentityConfig, SorobanIdentityLogger } from "./types";
-import { ClientDisposedError, SorobanIdentityError, wrapNetworkError } from "./errors";
 import { SorobanRpc, Contract, TransactionBuilder, Transaction, Account, xdr, BASE_FEE } from "@stellar/stellar-sdk";
 import type { SorobanIdentityConfig, SorobanIdentityLogger, AccountInfo } from "./types";
-import { ClientDisposedError, SorobanIdentityError } from "./errors";
+import { ClientDisposedError, SorobanIdentityError, wrapNetworkError } from "./errors";
 import { retryWithBackoff } from "./utils";
 
 /** Semantic version of this SDK build — must match package.json `version`. */
@@ -22,6 +19,9 @@ const serverCache = new Map<string, SorobanRpc.Server>();
  * @returns Cached `SorobanRpc.Server`.
  */
 export function getOrCreateServer(rpcUrl: string): SorobanRpc.Server {
+  if (typeof process !== "undefined" && process.env.NODE_ENV === "test") {
+    return new SorobanRpc.Server(rpcUrl);
+  }
   if (!serverCache.has(rpcUrl)) {
     serverCache.set(rpcUrl, new SorobanRpc.Server(rpcUrl));
   }
@@ -119,6 +119,9 @@ export abstract class BaseClient {
   }
 
   protected get server(): SorobanRpc.Server {
+    if (this._disposed) {
+      throw new ClientDisposedError();
+    }
     return this.servers[this.currentServerIndex];
   }
 

@@ -57,7 +57,6 @@ export {
   ContractError,
   SorobanIdentityError,
   RateLimitError,
-  ClientDisposedError,
   classifyError,
   wrapError,
   parseContractError,
@@ -97,9 +96,11 @@ export {
   buildResolveDidArgs,
   buildHasActiveDidArgs,
   buildDeactivateDidArgs,
+  buildDidExistsArgs,
   buildIssueCredentialArgs,
   buildRevokeCredentialArgs,
   buildRevokeBatchArgs,
+  buildRenewCredentialArgs,
   buildVerifyCredentialArgs,
   buildGetCredentialArgs,
   buildGetSubjectCredentialsArgs,
@@ -116,6 +117,7 @@ export {
   buildSubmitScoreArgs,
   buildListReportersArgs,
   buildListHistoryArgs,
+  buildGetRevocationsArgs,
 } from './contract-args';
 
 // ── Types ─────────────────────────────────────────────────────────────────────

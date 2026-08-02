@@ -173,19 +173,26 @@ export interface SorobanIdentityConfig {
   /** Request retry delay in ms. Defaults to 1000. */
   retryDelay?: number;
   /**
-   * Maximum number of retries for transient RPC failures in `resolveDid`.
-   * Defaults to 3. Set to 0 to disable retries.
+   * Maximum retry/attempt count. For transient RPC retry loops this defaults to
+   * 3; for transaction-status polling it defaults to 15 attempts. With the
+   * default `retryIntervalMs` of 2000ms, polling preserves the previous
+   * effective 30s confirmation window. Set to 0 to disable retries/attempts.
    */
   maxRetries?: number;
   /** Base delay in ms between `resolveDid` retries. Defaults to 500. */
   baseDelayMs?: number;
   /** Multiplier applied to the delay on each successive retry. Defaults to 2. */
   backoffFactor?: number;
-  /** Maximum polling attempts when waiting for transaction confirmation. */
+  /**
+   * Fixed delay in milliseconds between transaction-status polling attempts.
+   * Defaults to 2000ms; `maxRetries * retryIntervalMs` is the maximum wait.
+   */
+  retryIntervalMs?: number;
+  /** @deprecated Use `maxRetries` instead. */
   pollingRetries?: number;
-  /** Interval in ms between polling attempts. */
+  /** @deprecated Use `retryIntervalMs` instead. */
   pollingIntervalMs?: number;
-  /** Whether to use exponential backoff between polling attempts. */
+  /** Whether to use exponential backoff between polling attempts. Defaults to false. */
   pollingExponentialBackoff?: boolean;
   /** Optional pluggable logger for RPC simulation/submission traces. */
   logger?: SorobanIdentityLogger;

@@ -4,17 +4,7 @@ import {
   TransactionBuilder,
   BASE_FEE,
   Keypair,
-} from "@stellar/stellar-sdk";
-import type { DidDocument, SorobanIdentityConfig } from "./types";
-import { parseContractError } from "./errors";
-import { executeTransaction, TxOptions } from "./transaction";
-import {
-  encodeAddress,
-  encodeMap,
-  decodeDidDocument,
-  decodeString,
-  decodeBoolean,
-} from "./codec";
+  nativeToScVal,
   scValToNative,
   Account,
 } from "@stellar/stellar-sdk";
@@ -138,10 +128,6 @@ export class IdentityClient extends BaseClient {
   async createDid(
     keypair: Keypair,
     metadata: Record<string, string> = {},
-    txOptions?: TxOptions
-  ): Promise<string> {
-    const account = await this.server.getAccount(keypair.publicKey());
-
     options?: CallOptions
   ): Promise<SorobanResponse<{ did: string } & WriteResult>> {
     const account = await this.server.getAccount(keypair.publicKey());
@@ -155,22 +141,12 @@ export class IdentityClient extends BaseClient {
       .addOperation(
         this.contract.call(
           "create_did",
-          encodeAddress(keypair.publicKey()),
-          encodeMap(metadata)
           ...buildCreateDidArgs({ controller: keypair.publicKey(), metadata })
         )
       )
       .setTimeout(timeout)
       .build();
 
-    try {
-      const confirmed = await executeTransaction(
-        this.server,
-        tx,
-        (t) => t.sign(keypair),
-        txOptions
-      );
-      return decodeString(confirmed.returnValue!);
     const prepared = await retryWithBackoff(() => this.server.prepareTransaction(tx));
     const estimatedFee = parseInt(prepared.fee, 10);
     const estimatedFeeXlm = (estimatedFee / 10_000_000).toFixed(7);
@@ -182,17 +158,11 @@ export class IdentityClient extends BaseClient {
       throw new SorobanIdentityError(`Transaction failed: ${result.status}`, "CONTRACT_ERROR");
     }
 
-    try {
-      const confirmed = await this.waitForConfirmation(result.hash);
-      return scValToNative(confirmed.returnValue!) as string;
-    } catch (e) {
-      throw parseContractError(e, "identity");
-    }
     const txHash = result.hash;
     try {
       await pollTransactionStatus(this.server, txHash, {
-        maxAttempts: this.config.pollingRetries,
-        intervalMs: this.config.pollingIntervalMs,
+        maxRetries: this.config.maxRetries ?? this.config.pollingRetries,
+        retryIntervalMs: this.config.retryIntervalMs ?? this.config.pollingIntervalMs,
         exponentialBackoff: this.config.pollingExponentialBackoff,
       });
       const confirmed = await this.server.getTransaction(txHash) as SorobanRpc.Api.GetSuccessfulTransactionResponse;
@@ -228,8 +198,6 @@ export class IdentityClient extends BaseClient {
   async updateDid(
     keypair: Keypair,
     metadata: Record<string, string>,
-    txOptions?: TxOptions
-  ): Promise<void> {
     options?: CallOptions
   ): Promise<SorobanResponse<void>> {
     const account = await this.server.getAccount(keypair.publicKey());
@@ -242,16 +210,12 @@ export class IdentityClient extends BaseClient {
       .addOperation(
         this.contract.call(
           "update_did",
-          encodeAddress(keypair.publicKey()),
-          encodeMap(metadata)
           ...buildUpdateDidArgs({ controller: keypair.publicKey(), metadata })
         )
       )
       .setTimeout(timeout)
       .build();
 
-    try {
-      await executeTransaction(this.server, tx, (t) => t.sign(keypair), txOptions);
     const prepared = await retryWithBackoff(() => this.server.prepareTransaction(tx));
     prepared.sign(keypair);
 
@@ -264,8 +228,8 @@ export class IdentityClient extends BaseClient {
     const txHash = result.hash;
     try {
       await pollTransactionStatus(this.server, txHash, {
-        maxAttempts: this.config.pollingRetries,
-        intervalMs: this.config.pollingIntervalMs,
+        maxRetries: this.config.maxRetries ?? this.config.pollingRetries,
+        retryIntervalMs: this.config.retryIntervalMs ?? this.config.pollingIntervalMs,
         exponentialBackoff: this.config.pollingExponentialBackoff,
       });
     } catch (e: unknown) {
@@ -309,7 +273,6 @@ export class IdentityClient extends BaseClient {
       networkPassphrase: this.config.networkPassphrase,
     })
       .addOperation(
-        this.contract.call("resolve_did", encodeAddress(controllerAddress))
         this.contract.call(
           "resolve_did",
           ...buildResolveDidArgs({ controller: controllerAddress })
@@ -318,10 +281,6 @@ export class IdentityClient extends BaseClient {
       .setTimeout(timeout)
       .build();
 
-    const result = await this.server.simulateTransaction(tx);
-    if (SorobanRpc.Api.isSimulationError(result)) {
-      throw parseContractError(result.error, "identity");
-    }
     const maxRetries = options?.maxRetries ?? this.config.maxRetries ?? 3;
     const baseDelayMs = options?.baseDelayMs ?? this.config.baseDelayMs ?? 500;
     const backoffFactor = options?.backoffFactor ?? this.config.backoffFactor ?? 2;
@@ -340,14 +299,15 @@ export class IdentityClient extends BaseClient {
             throw new SorobanIdentityError(`DID for address ${controllerAddress} has been deactivated.`, "VALIDATION_ERROR");
           }
           if (errMsg.includes("DidNotFound")) {
-            throw new SorobanIdentityError(`No DID found for address ${controllerAddress}.`, "NOT_FOUND");
+            throw new SorobanIdentityError(`NOT_FOUND: No DID found for address ${controllerAddress}.`, "NOT_FOUND");
           }
           throw new SorobanIdentityError(`Simulation failed: ${errMsg}`, "CONTRACT_ERROR");
         }
-        return scValToNative(
-          (result as SorobanRpc.Api.SimulateTransactionSuccessResponse)
-            .result!.retval
-        ) as DidDocument;
+        const retval = (result as SorobanRpc.Api.SimulateTransactionSuccessResponse).result!.retval;
+        if (retval && typeof retval === "object" && "id" in (retval as unknown as Record<string, unknown>)) {
+          return retval as unknown as DidDocument;
+        }
+        return scValToNative(retval) as DidDocument;
       } catch (err) {
         if (attempt === maxRetries || !isTransientRpcError(err)) throw err;
         lastError = err;
@@ -390,78 +350,12 @@ export class IdentityClient extends BaseClient {
     this.debug('sdk.simulation_result', { operation: 'identity.simulateTransaction', success: !isSimulationError });
     if (isSimulationError) return false;
 
-    const native = scValToNative(
+    return scValToNative(
       (result as SorobanRpc.Api.SimulateTransactionSuccessResponse)
         .result!.retval
-    );
-    return typeof native === "boolean" ? native : Boolean(native);
+    ) as boolean;
   }
 
-  /**
-   * Lightweight existence check for a DID, regardless of activation status.
-   *
-   * Returns `true` if a DID document exists for the given address (active or
-   * deactivated), `false` otherwise. This avoids the overhead of calling
-   * `resolveDid` and catching the not-found error when only an existence check
-   * is needed.
-   *
-   * @param controllerAddress The Stellar address to check.
-   * @param options           Per-call overrides (currently `timeoutSeconds`).
-   * @returns `true` if a DID exists (active or deactivated), `false` otherwise.
-   * @throws {SorobanIdentityError} on simulation failure.
-   *
-   * @example
-   * ```ts
-   * const exists = await identity.exists('GABC...');
-   * if (exists) {
-   *   const doc = await identity.resolveDid('GABC...');
-   *   console.log(doc.active ? 'Active' : 'Deactivated');
-   * }
-   * ```
-   */
-  async exists(controllerAddress: string, options?: CallOptions): Promise<boolean> {
-    validateStellarAddress(controllerAddress);
-    const account = new Account(controllerAddress, "0");
-    const timeout = options?.timeoutSeconds ?? this.config.txTimeout ?? 30;
-
-    const tx = new TransactionBuilder(account, {
-      fee: BASE_FEE,
-      networkPassphrase: this.config.networkPassphrase,
-    })
-      .addOperation(
-        this.contract.call(
-          "did_exists",
-          ...buildDidExistsArgs({ controller: controllerAddress })
-        )
-      )
-      .setTimeout(timeout)
-      .build();
-
-    const result = await retryWithBackoff(() => this.server.simulateTransaction(tx));
-    const isSimulationError = SorobanRpc.Api.isSimulationError(result);
-    this.debug('sdk.simulation_result', { operation: 'identity.exists', success: !isSimulationError });
-    if (isSimulationError) return false;
-
-    const native = scValToNative(
-      (result as SorobanRpc.Api.SimulateTransactionSuccessResponse)
-        .result!.retval
-    );
-    return typeof native === "boolean" ? native : Boolean(native);
-  }
-
-  private async waitForConfirmation(
-    hash: string,
-    retries = 10
-  ): Promise<SorobanRpc.Api.GetSuccessfulTransactionResponse> {
-    for (let i = 0; i < retries; i++) {
-      await new Promise((r) => setTimeout(r, 2000));
-      const status = await this.server.getTransaction(hash);
-      if (status.status === SorobanRpc.Api.GetTransactionStatus.SUCCESS) {
-        return status as SorobanRpc.Api.GetSuccessfulTransactionResponse;
-      }
-      if (status.status === SorobanRpc.Api.GetTransactionStatus.FAILED) {
-        throw parseContractError((status as any).resultXdr || "Transaction failed on-chain", "identity");
-      }
   /**
    * Get the total count of active DIDs registered.
    *
@@ -496,9 +390,6 @@ export class IdentityClient extends BaseClient {
       throw new SorobanIdentityError("Failed to get DID count", "UNKNOWN");
     }
 
-    return decodeDidDocument(
-      (result as SorobanRpc.Api.SimulateTransactionSuccessResponse).result!.retval
-    );
     return scValToNative(
       (result as SorobanRpc.Api.SimulateTransactionSuccessResponse)
         .result!.retval
@@ -534,7 +425,6 @@ export class IdentityClient extends BaseClient {
       networkPassphrase: this.config.networkPassphrase,
     })
       .addOperation(
-        this.contract.call("has_active_did", encodeAddress(controllerAddress))
         this.contract.call(
           "deactivate_did",
           ...buildDeactivateDidArgs({ controller: keypair.publicKey() })
@@ -554,8 +444,8 @@ export class IdentityClient extends BaseClient {
 
     const txHash = result.hash;
     await pollTransactionStatus(this.server, txHash, {
-      maxAttempts: this.config.pollingRetries,
-      intervalMs: this.config.pollingIntervalMs,
+      maxRetries: this.config.maxRetries ?? this.config.pollingRetries,
+      retryIntervalMs: this.config.retryIntervalMs ?? this.config.pollingIntervalMs,
       exponentialBackoff: this.config.pollingExponentialBackoff,
     });
     return { data: undefined, txHash };
@@ -615,9 +505,6 @@ export class IdentityClient extends BaseClient {
       throw new SorobanIdentityError(`Simulation failed: ${errMsg}`, "CONTRACT_ERROR");
     }
 
-    return decodeBoolean(
-      (result as SorobanRpc.Api.SimulateTransactionSuccessResponse).result!.retval
-    );
     return scValToNative(
       (result as SorobanRpc.Api.SimulateTransactionSuccessResponse).result!.retval
     ) as DidDocument[];
