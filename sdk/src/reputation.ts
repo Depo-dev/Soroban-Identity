@@ -41,7 +41,19 @@ import {
 
 const PROBE_ADDRESS = "GAAZI4TCR3TY5OJHCTJC2A4QSY6CJWJH5IAJTGKIN2ER7LBNVKOCCWN";
 
-export type { ReputationRecord, ScoreHistoryEntry };
+export interface ReputationRecord {
+  subject: string;
+  score: number;
+  reporterCount: number;
+  updatedAt: number;
+}
+
+export interface ScoreHistoryEntry {
+  reporter: string;
+  delta: number;
+  reason: string;
+  submittedAt: number;
+}
 
 /**
  * Client for the reputation contract.
@@ -366,8 +378,8 @@ export class ReputationClient extends BaseClient {
 
     const txHash = result.hash;
     await pollTransactionStatus(this.server, txHash, {
-      maxAttempts: this.config.pollingRetries,
-      intervalMs: this.config.pollingIntervalMs,
+      maxRetries: this.config.maxRetries ?? this.config.pollingRetries,
+      retryIntervalMs: this.config.retryIntervalMs ?? this.config.pollingIntervalMs,
       exponentialBackoff: this.config.pollingExponentialBackoff,
     });
     return { data: { estimatedFee, estimatedFeeXlm }, txHash };

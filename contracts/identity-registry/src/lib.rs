@@ -7,26 +7,6 @@ use soroban_sdk::{
 };
 use soroban_sdk::xdr::ToXdr;
 
-pub const CONTRACT_VERSION: u32 = 1;
-const EVENT_VERSION: u32 = 1;
-
-mod keys;
-
-// ── Storage keys ──────────────────────────────────────────────────────────────
-
-const IDENTITY: Symbol = symbol_short!("IDENTITY");
-const ADMIN: Symbol = symbol_short!("ADMIN");
-const PENDING_ADMIN: Symbol = symbol_short!("PADMIN");
-const DID_COUNT: Symbol = symbol_short!("DIDCNT");
-const TOTAL_DIDS: Symbol = symbol_short!("TOTDIDS");
-
-const DID_STELLAR_PREFIX: &[u8] = b"did:stellar:";
-const TTL_LEDGERS: u32 = 6_312_000;
-
-/// Maximum number of service endpoints allowed on a DID document.
-/// Exceeding this limit returns [`ContractError::MaxServicesReached`].
-const MAX_SERVICES: u32 = 10;
-
 // ── Errors ────────────────────────────────────────────────────────────────────
 
 #[contracterror]
@@ -45,6 +25,7 @@ pub enum ContractError {
     NotPendingAdmin = 11,
     ServiceAlreadyExists = 12,
     MaxServicesReached = 13,
+    ContractPaused = 14,
 }
 
 /// Version returned by `ping` for deployment health checks.
@@ -61,6 +42,7 @@ const ADMIN: Symbol = symbol_short!("ADMIN");
 const PENDING_ADMIN: Symbol = symbol_short!("PADMIN");
 const DID_COUNT: Symbol = symbol_short!("DIDCNT");
 const TOTAL_DIDS: Symbol = symbol_short!("TOTDIDS");
+const PAUSED: Symbol = symbol_short!("PAUSED");
 
 /// Byte prefix for on-chain DID strings (`did:stellar:<address>`).
 const DID_STELLAR_PREFIX: &[u8] = b"did:stellar:";
@@ -68,6 +50,10 @@ const DID_STELLAR_PREFIX: &[u8] = b"did:stellar:";
 /// ~1 year in ledgers (5-second ledger close time).
 /// Used as the TTL extension on every persistent read/write.
 const TTL_LEDGERS: u32 = 6_312_000;
+
+/// Maximum number of service endpoints allowed on a DID document.
+/// Exceeding this limit returns [`ContractError::MaxServicesReached`].
+const MAX_SERVICES: u32 = 10;
 
 // ── Data types ────────────────────────────────────────────────────────────────
 
@@ -114,6 +100,17 @@ impl IdentityRegistry {
         Ok(())
     }
 
+    pub fn transfer_admin(env: Env, current_admin: Address, new_admin: Address) -> Result<(), ContractError> {
+        current_admin.require_auth();
+        let stored: Address = env.storage().instance().get(&ADMIN).expect("not initialized");
+        if stored != current_admin {
+            panic!("not the admin");
+        }
+        env.storage().instance().set(&ADMIN, &new_admin);
+        env.events().publish((ADMIN, symbol_short!("transfer")), (EVENT_VERSION, current_admin, new_admin));
+        Ok(())
+    }
+
     /// Proposes a new admin. Only the current admin can call this. This is step
     /// one of the two-step admin handoff — the proposed admin does not gain any
     /// privileges until they call [`Self::accept_admin`] themselves, which
@@ -140,9 +137,6 @@ impl IdentityRegistry {
             .instance()
             .get(&ADMIN)
             .ok_or(ContractError::NotInitialized)?;
-    pub fn transfer_admin(env: Env, current_admin: Address, new_admin: Address) -> Result<(), ContractError> {
-        current_admin.require_auth();
-        let stored: Address = env.storage().instance().get(&ADMIN).ok_or(ContractError::NotInitialized)?;
         if stored != current_admin {
             return Err(ContractError::Unauthorized);
         }
@@ -184,40 +178,13 @@ impl IdentityRegistry {
         env.storage().instance().remove(&PENDING_ADMIN);
         env.events().publish(
             (ADMIN, symbol_short!("accept")),
-            (EVENT_VERSION, old_admin, new_admin),
-        env.events().publish((ADMIN, symbol_short!("transfer")), (EVENT_VERSION, current_admin, new_admin));
-        Ok(())
-    }
-
-    pub fn propose_admin(env: Env, admin: Address, proposed: Address) -> Result<(), ContractError> {
-        admin.require_auth();
-        let stored: Address = env.storage().instance().get(&ADMIN).ok_or(ContractError::NotInitialized)?;
-        if stored != admin {
-            return Err(ContractError::Unauthorized);
-        }
-        env.storage().instance().set(&PENDING_ADMIN, &proposed);
-        env.events().publish((ADMIN, symbol_short!("proposed")), (EVENT_VERSION, admin, proposed));
-        Ok(())
-    }
-
-    pub fn accept_admin(env: Env, proposed: Address) -> Result<(), ContractError> {
-        proposed.require_auth();
-        let pending: Address = env.storage().instance().get(&PENDING_ADMIN).ok_or(ContractError::NoPendingAdmin)?;
-        if pending != proposed {
-            return Err(ContractError::NotPendingAdmin);
-        }
-        env.storage().instance().remove(&PENDING_ADMIN);
-        let old_admin: Address = env.storage().instance().get(&ADMIN).ok_or(ContractError::NotInitialized)?;
-        env.storage().instance().set(&ADMIN, &proposed);
-        env.events().publish(
-            (ADMIN, symbol_short!("accepted")),
-            (EVENT_VERSION, old_admin.clone(), proposed.clone()),
+            (EVENT_VERSION, old_admin.clone(), new_admin.clone()),
         );
         // Issue #549: explicit admin-transfer-completed event for off-chain
         // monitors/audit logs watching for ownership changes.
         env.events().publish(
             (symbol_short!("admin"), symbol_short!("xfer")),
-            (old_admin, proposed),
+            (old_admin, new_admin),
         );
         Ok(())
     }
@@ -232,8 +199,39 @@ impl IdentityRegistry {
         Ok(())
     }
 
+    /// Emergency stop: admin pauses all state-changing operations.
+    /// Read-only queries remain available. Emits `contract_paused`.
+    pub fn pause(env: Env, admin: Address) -> Result<(), ContractError> {
+        admin.require_auth();
+        Self::require_admin(&env, &admin)?;
+        env.storage().instance().set(&PAUSED, &true);
+        env.events().publish(
+            (symbol_short!("contract"), symbol_short!("paused")),
+            (EVENT_VERSION, admin),
+        );
+        Ok(())
+    }
+
+    /// Lifts an emergency stop. Admin-only. Emits `contract_unpaused`.
+    pub fn unpause(env: Env, admin: Address) -> Result<(), ContractError> {
+        admin.require_auth();
+        Self::require_admin(&env, &admin)?;
+        env.storage().instance().set(&PAUSED, &false);
+        env.events().publish(
+            (symbol_short!("contract"), symbol_short!("unpaused")),
+            (EVENT_VERSION, admin),
+        );
+        Ok(())
+    }
+
+    /// Read-only: whether the contract is currently paused.
+    pub fn is_paused(env: Env) -> bool {
+        env.storage().instance().get(&PAUSED).unwrap_or(false)
+    }
+
     pub fn create_did(env: Env, controller: Address, metadata: Map<String, String>) -> Result<String, ContractError> {
         controller.require_auth();
+        Self::require_not_paused(&env)?;
         let storage = env.storage().persistent();
         let key = Self::did_key(&env, &controller);
         if storage.has(&key) {
@@ -270,6 +268,7 @@ impl IdentityRegistry {
     /// an endpoint with the same `id` is already present.
     pub fn add_service(env: Env, controller: Address, service: ServiceEndpoint) -> Result<(), ContractError> {
         controller.require_auth();
+        Self::require_not_paused(&env)?;
         let storage = env.storage().persistent();
         let key = Self::did_key(&env, &controller);
         let mut doc: DidDocument = storage.get(&key).ok_or(ContractError::DidNotFound)?;
@@ -295,6 +294,7 @@ impl IdentityRegistry {
 
     pub fn update_did(env: Env, controller: Address, metadata: Map<String, String>) -> Result<(), ContractError> {
         controller.require_auth();
+        Self::require_not_paused(&env)?;
         if metadata.is_empty() {
             return Err(ContractError::EmptyMetadata);
         }
@@ -311,16 +311,26 @@ impl IdentityRegistry {
         storage.extend_ttl(&key, TTL_LEDGERS, TTL_LEDGERS);
         let mut hash_input = Self::string_to_bytes(&env, &doc.id);
         hash_input.extend_from_array(&doc.updated_at.to_be_bytes());
-        let meta_hash = env.crypto().sha256(&hash_input).to_bytes();
+        let meta_hash: BytesN<32> = env.crypto().sha256(&hash_input).into();
         env.events().publish((IDENTITY, symbol_short!("updated")), (EVENT_VERSION, controller, meta_hash));
         Ok(())
     }
 
+    /// Deactivates a DID. Only its controller can call this.
+    ///
+    /// # Errors
+    /// Returns [`ContractError::DidNotFound`] if no DID exists for the given controller.
+    /// Returns [`ContractError::DidDeactivated`] if the DID is already inactive —
+    /// repeated calls are rejected rather than double-decrementing [`DID_COUNT`].
     pub fn deactivate_did(env: Env, controller: Address) -> Result<(), ContractError> {
         controller.require_auth();
+        Self::require_not_paused(&env)?;
         let storage = env.storage().persistent();
         let key = Self::did_key(&env, &controller);
         let mut doc: DidDocument = storage.get(&key).ok_or(ContractError::DidNotFound)?;
+        if !doc.active {
+            return Err(ContractError::DidDeactivated);
+        }
         doc.active = false;
         doc.updated_at = env.ledger().timestamp();
         storage.set(&key, &doc);
@@ -344,15 +354,11 @@ impl IdentityRegistry {
     /// * `controller` - The address whose DID to reactivate.
     ///
     /// # Errors
-    /// Returns [`ContractError::DidNotFound`] if no DID exists for the given controller.
-    /// Returns [`ContractError::DidDeactivated`] if the DID is already inactive —
-    /// repeated calls are rejected rather than double-decrementing [`DID_COUNT`].
-    pub fn deactivate_did(env: Env, controller: Address) -> Result<(), ContractError> {
-        controller.require_auth();
     /// Returns [`ContractError::Unauthorized`] if `admin` is not the current admin.
     /// Returns [`ContractError::DidNotFound`] if no DID exists for the controller.
     pub fn reactivate_did(env: Env, admin: Address, controller: Address) -> Result<(), ContractError> {
         admin.require_auth();
+        Self::require_not_paused(&env)?;
 
         let stored_admin: Address = env
             .storage()
@@ -367,11 +373,6 @@ impl IdentityRegistry {
         let key = Self::did_key(&env, &controller);
         let mut doc: DidDocument = storage.get(&key).ok_or(ContractError::DidNotFound)?;
 
-        if !doc.active {
-            return Err(ContractError::DidDeactivated);
-        }
-
-        doc.active = false;
         // No-op if already active
         if doc.active {
             return Ok(());
@@ -383,13 +384,12 @@ impl IdentityRegistry {
         storage.set(&key, &doc);
         storage.extend_ttl(&key, TTL_LEDGERS, TTL_LEDGERS);
 
-        // Decrement DID count — only reached on the active → inactive transition above.
         // Increment active DID count
         let count: u32 = env.storage().instance().get(&DID_COUNT).unwrap_or(0);
         env.storage().instance().set(&DID_COUNT, &(count + 1));
 
         env.events().publish(
-            (IDENTITY, symbol_short!("reactivated")),
+            (IDENTITY, Symbol::new(&env, "reactivated")),
             (EVENT_VERSION, controller, doc.updated_at),
         );
         Ok(())
@@ -449,6 +449,7 @@ impl IdentityRegistry {
     // ── Service endpoints ─────────────────────────────────────────────────────
     pub fn remove_service(env: Env, controller: Address, service_id: String) -> Result<(), ContractError> {
         controller.require_auth();
+        Self::require_not_paused(&env)?;
         let key = Self::did_key(&env, &controller);
         let mut doc: DidDocument = env.storage().persistent().get(&key).ok_or(ContractError::DidNotFound)?;
         if !doc.active {
@@ -495,6 +496,19 @@ impl IdentityRegistry {
         env.storage().instance().set(&ADMIN, admin);
     }
 
+    fn require_admin(env: &Env, admin: &Address) -> Result<(), ContractError> {
+        let stored: Address = env.storage().instance().get(&ADMIN).ok_or(ContractError::NotInitialized)?;
+        if stored != *admin { return Err(ContractError::Unauthorized); }
+        Ok(())
+    }
+
+    fn require_not_paused(env: &Env) -> Result<(), ContractError> {
+        if env.storage().instance().get(&PAUSED).unwrap_or(false) {
+            return Err(ContractError::ContractPaused);
+        }
+        Ok(())
+    }
+
     fn validate_metadata(metadata: &Map<String, String>) -> Result<(), ContractError> {
         if metadata.len() > 10 {
             return Err(ContractError::MetadataTooLarge);
@@ -509,7 +523,7 @@ impl IdentityRegistry {
 
     fn did_key(env: &Env, controller: &Address) -> (Symbol, BytesN<32>) {
         let key_bytes = env.crypto().sha256(&controller.clone().to_xdr(env));
-        (IDENTITY, key_bytes)
+        (IDENTITY, key_bytes.into())
     }
 
     fn build_did_string(env: &Env, controller: &Address) -> String {
@@ -523,7 +537,7 @@ impl IdentityRegistry {
         String::from_bytes(env, &result)
     }
 
-    pub fn validate_did_format(env: &Env, did: &String) -> bool {
+    fn validate_did_format(env: &Env, did: &String) -> bool {
         if did.len() != 68 { return false; }
         let did_bytes = Self::string_to_bytes(env, did);
         for (i, expected) in DID_STELLAR_PREFIX.iter().enumerate() {
@@ -996,5 +1010,62 @@ mod tests {
         client.deactivate_did(&user2);
         assert!(client.did_exists(&user2));
         assert!(!client.has_active_did(&user2));
+    }
+
+    #[test]
+    fn test_pause_blocks_writes_allows_reads() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, IdentityRegistry);
+        let client = IdentityRegistryClient::new(&env, &contract_id);
+        let admin = Address::generate(&env);
+        client.initialize(&admin);
+
+        let user = Address::generate(&env);
+        client.create_did(&user, &Map::new(&env));
+
+        assert!(!client.is_paused());
+        client.pause(&admin);
+        assert!(client.is_paused());
+
+        let user2 = Address::generate(&env);
+        assert_eq!(
+            client.try_create_did(&user2, &Map::new(&env)),
+            Err(Ok(ContractError::ContractPaused))
+        );
+
+        let doc = client.resolve_did(&user);
+        assert!(doc.active);
+        assert!(client.has_active_did(&user));
+
+        client.unpause(&admin);
+        assert!(!client.is_paused());
+        client.create_did(&user2, &Map::new(&env));
+        assert!(client.has_active_did(&user2));
+    }
+
+    #[test]
+    fn test_only_admin_can_pause() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, IdentityRegistry);
+        let client = IdentityRegistryClient::new(&env, &contract_id);
+        let admin = Address::generate(&env);
+        client.initialize(&admin);
+
+        let rando = Address::generate(&env);
+        assert_eq!(client.try_pause(&rando), Err(Ok(ContractError::Unauthorized)));
+        assert!(!client.is_paused());
+    }
+
+    #[test]
+    fn test_resolve_did_id_format() {
+        let (env, client) = setup();
+        let user = Address::generate(&env);
+        client.create_did(&user, &Map::new(&env));
+        let doc = client.resolve_did(&user);
+        let id = doc.id.to_string();
+        assert!(id.starts_with("did:stellar:"));
+        assert_eq!(doc.id.len(), 68);
     }
 }

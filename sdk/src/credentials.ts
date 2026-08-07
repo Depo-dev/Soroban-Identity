@@ -24,13 +24,14 @@ import type {
 } from "./types";
 import { validateConfig } from "./types";
 import { retryWithBackoff, validateStellarAddress, pollTransactionStatus, runConcurrent } from "./utils";
-import { ContractError, SorobanIdentityError, ClaimsValidationError, wrapError } from "./errors";
+import { ContractError, SorobanIdentityError, wrapError, ClaimsValidationError } from "./errors";
 import { CREDENTIAL_MANAGER_ERRORS } from "./error-codes";
 import { BaseClient } from "./base-client";
 import {
   buildIssueCredentialArgs,
   buildRevokeCredentialArgs,
   buildRevokeBatchArgs,
+  buildRenewCredentialArgs,
   buildVerifyCredentialArgs,
   buildGetCredentialArgs,
   buildGetSubjectCredentialsArgs,
@@ -40,12 +41,34 @@ import {
   buildListIssuersArgs,
   buildGetIssuerCredentialsArgs,
   buildListIssuerCredentialsArgs,
+  buildGetRevocationsArgs,
 } from "./contract-args";
 
 const PROBE_ADDRESS = "GAAZI4TCR3TY5OJHCTJC2A4QSY6CJWJH5IAJTGKIN2ER7LBNVKOCCWN";
 
-const CREDENTIAL_NOT_FOUND_CODE = 3;
-const CREDENTIAL_REVOKED_CODE = 4;
+/** All parameters required for a single {@link CredentialClient.issueCredential} call. */
+export interface CredentialInput {
+  issuerKeypair: Keypair;
+  subjectAddress: string;
+  credentialType: CredentialType;
+  claims: Record<string, string>;
+  claimsHashHex: string;
+  expiresAt?: number;
+  options?: CallOptions & { nonce?: string; schemaId?: string };
+  signatureHex?: string;
+}
+
+/** Options for {@link CredentialClient.issueCredentialBatch}. */
+export interface BatchOptions {
+  /** Maximum parallel in-flight issuances per chunk. Defaults to `5`. */
+  concurrency?: number;
+}
+
+/** Return type of {@link CredentialClient.issueCredentialBatch}. */
+export interface BatchResult {
+  succeeded: Array<SorobanResponse<{ credentialId: string } & WriteResult>>;
+  failed: Array<{ input: CredentialInput; error: SorobanIdentityError }>;
+}
 
 /**
  * Converts a JavaScript Date or millisecond timestamp to Unix seconds.
@@ -172,40 +195,6 @@ export class CredentialClient extends BaseClient {
   }
 
   /**
-   * Register a trusted issuer and their Ed25519 public key (admin only).
-   */
-  async addIssuer(
-    adminKeypair: Keypair,
-    issuerAddress: string,
-    issuerPublicKeyBytes: Buffer | Uint8Array
-  ): Promise<void> {
-    const account = await this.server.getAccount(adminKeypair.publicKey());
-
-    const tx = new TransactionBuilder(account, {
-      fee: BASE_FEE,
-      networkPassphrase: this.config.networkPassphrase,
-    })
-      .addOperation(
-        this.contract.call(
-          "add_issuer",
-          nativeToScVal(issuerAddress, { type: "address" }),
-          nativeToScVal(Buffer.from(issuerPublicKeyBytes), { type: "bytes" })
-        )
-      )
-      .setTimeout(30)
-      .build();
-
-    const prepared = await retryWithBackoff(() => this.server.prepareTransaction(tx));
-    prepared.sign(adminKeypair);
-
-    const result = await retryWithBackoff(() => this.server.sendTransaction(prepared));
-    if (result.status !== "PENDING") {
-      throw new SorobanIdentityError(`Transaction failed: ${result.status}`, "CONTRACT_ERROR");
-    }
-    await pollTransactionStatus(this.server, result.hash);
-  }
-
-  /**
    * Issue a credential to a subject. Caller must be a registered issuer.
    *
    * @param issuerKeypair   The registered issuer signing the transaction.
@@ -304,12 +293,18 @@ export class CredentialClient extends BaseClient {
 
       const txHash = result.hash;
       await pollTransactionStatus(this.server, txHash, {
-        maxAttempts: this.config.pollingRetries,
-        intervalMs: this.config.pollingIntervalMs,
+        maxRetries: this.config.maxRetries ?? this.config.pollingRetries,
+        retryIntervalMs: this.config.retryIntervalMs ?? this.config.pollingIntervalMs,
         exponentialBackoff: this.config.pollingExponentialBackoff,
       });
       const confirmed = await this.server.getTransaction(txHash) as SorobanRpc.Api.GetSuccessfulTransactionResponse;
-      const raw = scValToNative(confirmed.returnValue!) as Uint8Array;
+      // Returns BytesN<32> — encode as hex
+      const decoded = scValToNative(confirmed.returnValue!);
+      const raw = decoded instanceof Uint8Array
+        ? decoded
+        : confirmed.returnValue instanceof Uint8Array
+          ? confirmed.returnValue
+          : Buffer.alloc(32);
       const credentialId = Buffer.from(raw).toString("hex");
       return { data: { credentialId, estimatedFee, estimatedFeeXlm }, txHash };
     };
@@ -378,6 +373,76 @@ export class CredentialClient extends BaseClient {
   }
 
   /**
+   * Renew a credential by extending its expiry without changing the credential ID.
+   *
+   * Only the original issuer may call this. The credential must not be revoked.
+   * `newExpiresAt` must be strictly greater than the current `expires_at`.
+   *
+   * @param issuerKeypair  The registered issuer keypair that originally issued the credential.
+   * @param credentialId   Hex-encoded credential ID (32 bytes).
+   * @param newExpiresAt   New Unix timestamp (seconds). Use {@link toCredentialExpiry} to
+   *                       convert from milliseconds. Must be > current expires_at.
+   * @param options        Per-call overrides.
+   * @returns `{ txHash }` — the on-chain transaction hash.
+   * @throws {SorobanIdentityError} with code `NOT_FOUND` if credential does not exist,
+   *   `UNAUTHORIZED` if the caller is not the issuer, `VALIDATION_ERROR` if the credential
+   *   is revoked, or `INVALID_ARGUMENT` if newExpiresAt is not later than the current expiry.
+   *
+   * @example
+   * ```ts
+   * const { txHash } = await credentials.renewCredential(
+   *   issuerKeypair,
+   *   credentialId,
+   *   toCredentialExpiry(Date.now() + 30 * 24 * 60 * 60 * 1000) // +30 days
+   * );
+   * ```
+   */
+  async renewCredential(
+    issuerKeypair: Keypair,
+    credentialId: string,
+    newExpiresAt: number,
+    options?: CallOptions
+  ): Promise<{ txHash: string }> {
+    const account = await this.server.getAccount(issuerKeypair.publicKey());
+    const timeout = options?.timeoutSeconds ?? this.config.txTimeout ?? 30;
+    const idBytes = Buffer.from(credentialId, 'hex');
+
+    const tx = new TransactionBuilder(account, {
+      fee: BASE_FEE,
+      networkPassphrase: this.config.networkPassphrase,
+    })
+      .addOperation(
+        this.contract.call(
+          'renew_credential',
+          ...buildRenewCredentialArgs({
+            issuer: issuerKeypair.publicKey(),
+            credentialId: idBytes,
+            newExpiresAt,
+          })
+        )
+      )
+      .setTimeout(timeout)
+      .build();
+
+    try {
+      const prepared = await retryWithBackoff(() => this.server.prepareTransaction(tx));
+      prepared.sign(issuerKeypair);
+
+      const result = await retryWithBackoff(() => this.server.sendTransaction(prepared));
+      this.debug('sdk.submission_outcome', { operation: 'credentials.renewCredential', status: result.status });
+      if (result.status !== 'PENDING') {
+        throw new SorobanIdentityError(`Transaction failed: ${result.status}`, 'CONTRACT_ERROR');
+      }
+
+      const txHash = result.hash;
+      await pollTransactionStatus(this.server, txHash);
+      return { txHash };
+    } catch (e) {
+      throw wrapError(e);
+    }
+  }
+
+  /**
    * Atomically revoke multiple credentials in a single transaction.
    * Maximum batch size is 50.
    */
@@ -393,6 +458,7 @@ export class CredentialClient extends BaseClient {
         'BATCH_TOO_LARGE'
       );
     }
+
     const account = await this.server.getAccount(issuerKeypair.publicKey());
     const timeout = options?.timeoutSeconds ?? this.config.txTimeout ?? 30;
     const idBuffers = ids.map((id) => Buffer.from(id, 'hex'));
@@ -436,14 +502,11 @@ export class CredentialClient extends BaseClient {
     schemaId: string,
     claims: Record<string, string>
   ): Promise<void> {
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    type ValidateFn = { (data: unknown): boolean; errors?: any[] };
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    let AjvCtor: new (opts?: Record<string, unknown>) => { compile(schema: unknown): ValidateFn };
+    // Lazy-load ajv to avoid bundling it for callers who don't use schemaId
+    let Ajv: any;
     try {
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      const mod = await import("ajv") as any;
-      AjvCtor = mod.default ?? mod;
+      const moduleName = "ajv";
+      ({ default: Ajv } = await import(moduleName));
     } catch {
       throw new SorobanIdentityError(
         "ClaimsValidationError: ajv is required for schema validation. Install it with: npm install ajv",
@@ -526,6 +589,7 @@ export class CredentialClient extends BaseClient {
       return { valid: true };
     }
 
+    // Contract returned false — fetch the credential to determine why
     try {
       const credential = await this.getCredential(callerAddress, credentialId, options);
       if (credential.revoked) return { valid: false, reason: 'revoked' };
@@ -589,6 +653,49 @@ export class CredentialClient extends BaseClient {
   }
 
   /**
+   * Find credentials issued to a subject that contain a specific claim key/value pair.
+   *
+   * **Performance caveat:** Claim values are not indexed on-chain. This method
+   * fetches all credentials for the subject via {@link CredentialClient.getCredentialsBySubject}
+   * and filters them client-side. For subjects with many credentials, prefer
+   * building an off-chain index using contract events (`CRED.issued`).
+   *
+   * @param callerAddress  Stellar address used to build the read simulations.
+   * @param subjectAddress The subject whose credentials to search.
+   * @param claimKey       The claim key to match (case-sensitive).
+   * @param claimValue     The expected claim value (case-sensitive).
+   * @param options        Per-call overrides (currently `timeoutSeconds`).
+   * @returns Array of {@link Credential} records where `claims[claimKey] === claimValue`.
+   * @throws {SorobanIdentityError} on simulation failure.
+   *
+   * @example
+   * ```ts
+   * // Find all KYC credentials where country=NG
+   * const results = await credentials.getCredentialsByClaimKey(
+   *   caller,
+   *   subject,
+   *   'country',
+   *   'NG'
+   * );
+   * ```
+   */
+  async getCredentialsByClaimKey(
+    callerAddress: string,
+    subjectAddress: string,
+    claimKey: string,
+    claimValue: string,
+    options?: CallOptions
+  ): Promise<Credential[]> {
+    validateStellarAddress(callerAddress);
+    validateStellarAddress(subjectAddress);
+    const all = await this.getCredentialsBySubject(callerAddress, subjectAddress, options);
+    return all.filter((cred) => {
+      const claims = cred.claims as Record<string, string>;
+      return claims[claimKey] === claimValue;
+    });
+  }
+
+  /**
    * Get a credential by ID.
    */
   async getCredential(
@@ -628,7 +735,7 @@ export class CredentialClient extends BaseClient {
           lower.includes("not found")
         ) {
           throw new SorobanIdentityError(
-            `Credential not found: ${credentialId}`,
+            `CredentialNotFound: credential ${credentialId} does not exist`,
             "NOT_FOUND"
           );
         }
@@ -792,6 +899,50 @@ export class CredentialClient extends BaseClient {
       (result as SorobanRpc.Api.SimulateTransactionSuccessResponse)
         .result!.retval
     ) as string[];
+  }
+
+
+  /**
+   * Return all revoked credential IDs for an issuer/subject pair.
+   *
+   * Active credentials are not included; when the pair has no revocations the
+   * contract returns an empty vector and this method resolves to `[]`.
+   */
+  async getRevocations(
+    issuerAddress: string,
+    subjectAddress: string,
+    options?: CallOptions
+  ): Promise<string[]> {
+    validateStellarAddress(issuerAddress);
+    validateStellarAddress(subjectAddress);
+    const account = await this.server.getAccount(issuerAddress);
+    const timeout = options?.timeoutSeconds ?? this.config.txTimeout ?? 30;
+
+    const tx = new TransactionBuilder(account, {
+      fee: BASE_FEE,
+      networkPassphrase: this.config.networkPassphrase,
+    })
+      .addOperation(
+        this.contract.call(
+          'get_revocations',
+          ...buildGetRevocationsArgs({ issuer: issuerAddress, subject: subjectAddress })
+        )
+      )
+      .setTimeout(timeout)
+      .build();
+
+    const result = await retryWithBackoff(() => this.server.simulateTransaction(tx));
+    if (SorobanRpc.Api.isSimulationError(result)) {
+      const errMsg = result.error ?? '';
+      const contractErr = ContractError.extract(errMsg, CREDENTIAL_MANAGER_ERRORS);
+      if (contractErr) throw contractErr;
+      throw new SorobanIdentityError(`Simulation failed: ${errMsg}`, 'CONTRACT_ERROR');
+    }
+
+    const ids = scValToNative(
+      (result as SorobanRpc.Api.SimulateTransactionSuccessResponse).result!.retval
+    ) as Uint8Array[];
+    return (ids ?? []).map((raw) => Buffer.from(raw).toString('hex'));
   }
 
   /**
@@ -1077,33 +1228,6 @@ export class CredentialClient extends BaseClient {
   }
 
   /**
-   * Client-side filter for credentials matching a specific claim key-value pair.
-   */
-  async getCredentialsByClaimKey(
-    callerAddress: string,
-    subjectAddress: string,
-    claimKey: string,
-    claimValue: string,
-    options?: CallOptions
-  ): Promise<Credential[]> {
-    const allCredentials = await this.getCredentialsBySubject(
-      callerAddress,
-      subjectAddress,
-      options
-    );
-
-    return allCredentials.filter((cred) => {
-      const claims = cred.claims as unknown as Map<string, string>;
-      if (claims instanceof Map) {
-        return claims.get(claimKey) === claimValue;
-      } else if (typeof claims === 'object') {
-        return (claims as Record<string, string>)[claimKey] === claimValue;
-      }
-      return false;
-    });
-  }
-
-  /**
    * Liveness probe — calls the on-chain `ping()` function.
    */
   async ping(options?: CallOptions): Promise<number> {
@@ -1126,5 +1250,48 @@ export class CredentialClient extends BaseClient {
     return scValToNative(
       (result as SorobanRpc.Api.SimulateTransactionSuccessResponse).result!.retval
     ) as number;
+  }
+
+  /**
+   * Returns all revoked credential IDs for the given issuer.
+   *
+   * Closes #553: because on-chain `verify_credential` results must not be
+   * cached indefinitely, consumers can call this method periodically (or
+   * subscribe to `credential_revoked` events via {@link SorobanEventListener})
+   * to detect newly-revoked credentials and invalidate local caches.
+   *
+   * The list is derived by iterating the issuer's on-chain credential index
+   * and filtering for entries where `revoked === true`. For large issuers
+   * use the paginated form via {@link CredentialClient.listIssuerCredentials}
+   * and filter client-side, or subscribe to the `credential_revoked` event
+   * stream for push-based invalidation.
+   *
+   * @param callerAddress  Any valid Stellar address (used as the fee-payer account).
+   * @param issuerAddress  The issuer whose revocation list to fetch.
+   * @param options        Per-call overrides (currently `timeoutSeconds`).
+   * @returns Array of hex-encoded 32-byte credential IDs that have been revoked.
+   *
+   * @example
+   * ```ts
+   * // closes #553 — re-verify or invalidate any locally-cached result for these IDs
+   * const revoked = await credentials.getRevocationList(caller, issuerAddress);
+   * for (const id of revoked) {
+   *   cache.invalidate(id);
+   * }
+   * ```
+   */
+  async getRevocationList(
+    callerAddress: string,
+    issuerAddress: string,
+    options?: CallOptions
+  ): Promise<string[]> {
+    validateStellarAddress(issuerAddress);
+    // Fetch all credentials for this issuer and return the revoked IDs.
+    // Closes #553: consumers must re-verify or subscribe to credential_revoked
+    // events rather than cache verify_credential results indefinitely.
+    const allCredentials = await this.getCredentialsByIssuer(callerAddress, issuerAddress, options);
+    return allCredentials
+      .filter((cred) => cred.revoked)
+      .map((cred) => cred.id);
   }
 }

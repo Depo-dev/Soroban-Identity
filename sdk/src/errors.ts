@@ -27,6 +27,8 @@
 export type SorobanErrorCode =
   | "NOT_FOUND"
   | "UNAUTHORIZED"
+  | "NOT_AN_ISSUER"
+  | "NOT_A_REPORTER"
   | "ALREADY_EXISTS"
   | "ALREADY_INITIALIZED"
   | "INVALID_INPUT"
@@ -43,6 +45,8 @@ export type SorobanErrorCode =
   | "RATE_LIMITED"
   | "TIMEOUT"
   | "VALIDATION_ERROR"
+  | "BATCH_TOO_LARGE"
+  | "CLIENT_NOT_READY"
   | "CLIENT_DISPOSED"
   | "CLIENT_NOT_READY"
   | "BATCH_TOO_LARGE"
@@ -81,6 +85,7 @@ export class SorobanIdentityError extends Error {
   /** Discriminator code — see {@link SorobanErrorCode}. */
   readonly code: SorobanErrorCode;
   readonly details?: Record<string, unknown>;
+  readonly contractCode?: number;
   /** The underlying error, if this wraps one. */
   readonly originalError?: unknown;
   /** Transaction hash when the failure is tied to an on-chain submission. */
@@ -104,9 +109,11 @@ export class SorobanIdentityError extends Error {
       this.details = codeOrInit.details;
       this.originalError = codeOrInit.originalError ?? originalError;
       this.txHash = codeOrInit.txHash;
+      this.contractCode = typeof codeOrInit.details?.contractCode === "number" ? codeOrInit.details.contractCode : undefined;
     } else {
       this.code = codeOrInit;
       this.originalError = originalError;
+      this.contractCode = typeof originalError === "number" ? originalError : undefined;
     }
   }
 
@@ -118,6 +125,47 @@ export class SorobanIdentityError extends Error {
       ...(this.txHash ? { txHash: this.txHash } : {}),
     };
   }
+}
+
+const IDENTITY_ERRORS: Record<number, { code: SorobanErrorCode; message: string }> = {
+  1: { code: "ALREADY_EXISTS", message: "Registry is already initialized" },
+  2: { code: "ALREADY_EXISTS", message: "DID already exists for this address" },
+  3: { code: "NOT_FOUND", message: "DID not found" },
+  4: { code: "UNAUTHORIZED", message: "Unauthorized operation" },
+};
+
+const CREDENTIAL_ERRORS: Record<number, { code: SorobanErrorCode; message: string }> = {
+  1: { code: "ALREADY_EXISTS", message: "Credential manager is already initialized" },
+  2: { code: "ALREADY_EXISTS", message: "Not initialized" },
+  3: { code: "NOT_FOUND", message: "Credential not found" },
+  4: { code: "UNAUTHORIZED", message: "Only the issuer can perform this action" },
+  5: { code: "NOT_AN_ISSUER", message: "Not a registered issuer" },
+};
+
+const REPUTATION_PARSE_ERRORS: Record<number, { code: SorobanErrorCode; message: string }> = {
+  1: { code: "ALREADY_EXISTS", message: "Reputation contract is already initialized" },
+  2: { code: "ALREADY_EXISTS", message: "Not initialized" },
+  3: { code: "NOT_A_REPORTER", message: "Not a registered reporter" },
+};
+
+/** Helper to parse raw Soroban simulation / tx errors into typed SorobanIdentityError. */
+export function parseContractError(
+  error: unknown,
+  contractType: "identity" | "credential" | "reputation"
+): SorobanIdentityError {
+  if (error instanceof SorobanIdentityError) return error;
+  const errStr = error instanceof Error ? error.message : String(error);
+  const match =
+    errStr.match(/Error\(Contract,\s*#?(\d+)\)/i) ||
+    errStr.match(/contract error #?(\d+)/i);
+  if (match) {
+    const codeNum = parseInt(match[1] as string, 10);
+    const map = contractType === "identity" ? IDENTITY_ERRORS : contractType === "credential" ? CREDENTIAL_ERRORS : REPUTATION_PARSE_ERRORS;
+    const mapped = map[codeNum];
+    if (mapped) return new SorobanIdentityError(mapped.message, { code: mapped.code, details: { contractCode: codeNum } });
+    return new SorobanIdentityError(`Contract error #${codeNum}`, { code: "CONTRACT_ERROR", details: { contractCode: codeNum } });
+  }
+  return new SorobanIdentityError(errStr, "UNKNOWN");
 }
 
 /**
@@ -193,8 +241,54 @@ export class ClaimsValidationError extends Error {
 }
 
 /**
- * Map a free-form error message to the envelope code.
+ * Detect whether a thrown value is a network-level transport failure
+ * (ECONNREFUSED, ENOTFOUND, fetch failed, timeout, etc.) rather than
+ * a contract-level or application error.
  */
+export function isNetworkError(err: unknown): boolean {
+  const msg = (err instanceof Error ? err.message : String(err)).toLowerCase();
+  return (
+    /econnrefused|enotfound|econnreset|etimedout|network|fetch.*fail|socket.*hang/u.test(msg) ||
+    (err instanceof Error && err.name === "FetchError") ||
+    (err instanceof Error && err.name === "TypeError" && msg.includes("fetch"))
+  );
+}
+
+/**
+ * Wrap a network-level error into a `SorobanIdentityError` with:
+ *   - `code: "NETWORK_ERROR"`
+ *   - a message that includes the RPC URL so callers can distinguish
+ *     a misconfigured endpoint from a transient outage
+ *   - `details.cause` holding the original error
+ *
+ * Non-network errors are re-thrown unchanged so contract-level errors
+ * still surface with their original type.
+ *
+ * @param err    The caught error.
+ * @param rpcUrl The Soroban RPC URL that was being contacted.
+ * @param ctx    Optional context label (e.g. `"simulateTransaction"`).
+ */
+export function wrapNetworkError(err: unknown, rpcUrl: string, ctx?: string): never {
+  if (err instanceof SorobanIdentityError) throw err;
+
+  const cause = err instanceof Error ? err : new Error(String(err));
+  const label = ctx ? ` during ${ctx}` : "";
+
+  if (isNetworkError(err)) {
+    throw new SorobanIdentityError(
+      `Network error${label}: unable to reach Soroban RPC at ${rpcUrl} — ${cause.message}`,
+      {
+        code: "NETWORK_ERROR",
+        details: { cause, rpcUrl, context: ctx },
+        originalError: err,
+      }
+    );
+  }
+
+  // Not a network error — re-throw as-is so higher-level handlers can
+  // parse contract codes, simulation failures, etc.
+  throw err;
+}
 export function classifyError(message: string): SorobanErrorCode {
   const m = message.toLowerCase();
   if (/already\s+(registered|exists|active|issued)/u.test(m)) return "ALREADY_EXISTS";
@@ -209,7 +303,7 @@ export function classifyError(message: string): SorobanErrorCode {
   if (/invalid|malformed|bad request|missing/u.test(m)) return "INVALID_INPUT";
   if (/network.*timed?\s*out|connection.*timed?\s*out/u.test(m)) return "NETWORK_TIMEOUT";
   if (/timed?\s*out|timeout/u.test(m)) return "TIMEOUT";
-  if (/econnrefused|enotfound|network|fetch failed/u.test(m)) return "NETWORK_ERROR";
+  if (/econnrefused|enotfound|econnreset|network|fetch failed|socket.*hang/u.test(m)) return "NETWORK_ERROR";
   if (/rpc.*error|rpc.*fail/u.test(m)) return "RPC_ERROR";
   if (/#\d+/.test(m)) return "CONTRACT_ERROR";
   return "UNKNOWN";

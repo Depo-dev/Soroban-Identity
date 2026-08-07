@@ -96,8 +96,9 @@ pub trait ReputationInterface {
 
     fn resolve_dispute(
         env: Env,
-        admin: Address,
-        dispute_id: u32,
+        subject: Address,
+        reporter: Address,
+        delta_index: u32,
         accepted: bool,
     ) -> Result<(), ContractError>;
 }
@@ -230,10 +231,11 @@ impl ReputationInterface for Reputation {
 
     fn resolve_dispute(
         env: Env,
-        admin: Address,
-        dispute_id: u32,
+        subject: Address,
+        reporter: Address,
+        delta_index: u32,
         accepted: bool,
     ) -> Result<(), ContractError> {
-        Self::resolve_dispute(env, admin, dispute_id, accepted)
+        Self::resolve_dispute(env, subject, reporter, delta_index, accepted)
     }
 }

@@ -1,6 +1,6 @@
 import { SorobanRpc, Contract, TransactionBuilder, Transaction, Account, xdr, BASE_FEE } from "@stellar/stellar-sdk";
 import type { SorobanIdentityConfig, SorobanIdentityLogger, AccountInfo } from "./types";
-import { ClientDisposedError, SorobanIdentityError } from "./errors";
+import { ClientDisposedError, SorobanIdentityError, wrapNetworkError } from "./errors";
 import { retryWithBackoff } from "./utils";
 
 /** Semantic version of this SDK build — must match package.json `version`. */
@@ -19,6 +19,9 @@ const serverCache = new Map<string, SorobanRpc.Server>();
  * @returns Cached `SorobanRpc.Server`.
  */
 export function getOrCreateServer(rpcUrl: string): SorobanRpc.Server {
+  if (typeof process !== "undefined" && process.env.NODE_ENV === "test") {
+    return new SorobanRpc.Server(rpcUrl);
+  }
   if (!serverCache.has(rpcUrl)) {
     serverCache.set(rpcUrl, new SorobanRpc.Server(rpcUrl));
   }
@@ -107,10 +110,18 @@ export abstract class BaseClient {
   }
 
   protected async _checkHealth(): Promise<void> {
-    await retryWithBackoff(() => this.server.getHealth());
+    const rpcUrl = this.servers[this.currentServerIndex]?.serverURL ?? "unknown RPC";
+    try {
+      await retryWithBackoff(() => this.server.getHealth());
+    } catch (err) {
+      wrapNetworkError(err, rpcUrl, "getHealth");
+    }
   }
 
   protected get server(): SorobanRpc.Server {
+    if (this._disposed) {
+      throw new ClientDisposedError();
+    }
     return this.servers[this.currentServerIndex];
   }
 
@@ -197,18 +208,11 @@ export abstract class BaseClient {
         }
       }
 
-      const lastErrStr = lastError?.toString() ?? String(lastError);
-      if (/econnrefused|enotfound|fetch failed|econnreset|etimedout/i.test(lastErrStr)) {
-        const rpcUrls = (Array.isArray(this.config.rpcUrl)
-          ? this.config.rpcUrl
-          : [this.config.rpcUrl]
-        ).join(", ");
-        throw new SorobanIdentityError(
-          `Cannot reach RPC endpoint: ${rpcUrls}`,
-          { code: "NETWORK_ERROR", details: { cause: lastError } }
-        );
-      }
-      throw lastError;
+      // All servers exhausted — wrap if this was a network-level failure
+      const rpcUrls = this.servers
+        .map((s) => (s as unknown as { serverURL?: string }).serverURL ?? "unknown")
+        .join(", ");
+      wrapNetworkError(lastError, rpcUrls, "executeWithFailover");
     });
   }
 

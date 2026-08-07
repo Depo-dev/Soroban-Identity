@@ -134,8 +134,8 @@ export class IdentityClient extends BaseClient {
     const txHash = result.hash;
     try {
       await pollTransactionStatus(this.server, txHash, {
-        maxAttempts: this.config.pollingRetries,
-        intervalMs: this.config.pollingIntervalMs,
+        maxRetries: this.config.maxRetries ?? this.config.pollingRetries,
+        retryIntervalMs: this.config.retryIntervalMs ?? this.config.pollingIntervalMs,
         exponentialBackoff: this.config.pollingExponentialBackoff,
       });
       const confirmed = await this.server.getTransaction(txHash) as SorobanRpc.Api.GetSuccessfulTransactionResponse;
@@ -195,8 +195,8 @@ export class IdentityClient extends BaseClient {
     const txHash = result.hash;
     try {
       await pollTransactionStatus(this.server, txHash, {
-        maxAttempts: this.config.pollingRetries,
-        intervalMs: this.config.pollingIntervalMs,
+        maxRetries: this.config.maxRetries ?? this.config.pollingRetries,
+        retryIntervalMs: this.config.retryIntervalMs ?? this.config.pollingIntervalMs,
         exponentialBackoff: this.config.pollingExponentialBackoff,
       });
     } catch (e: unknown) {
@@ -262,14 +262,15 @@ export class IdentityClient extends BaseClient {
             throw new SorobanIdentityError(`DID for address ${controllerAddress} has been deactivated.`, "VALIDATION_ERROR");
           }
           if (errMsg.includes("DidNotFound")) {
-            throw new SorobanIdentityError(`No DID found for address ${controllerAddress}.`, "NOT_FOUND");
+            throw new SorobanIdentityError(`NOT_FOUND: No DID found for address ${controllerAddress}.`, "NOT_FOUND");
           }
           throw new SorobanIdentityError(`Simulation failed: ${errMsg}`, "CONTRACT_ERROR");
         }
-        return scValToNative(
-          (result as SorobanRpc.Api.SimulateTransactionSuccessResponse)
-            .result!.retval
-        ) as DidDocument;
+        const retval = (result as SorobanRpc.Api.SimulateTransactionSuccessResponse).result!.retval;
+        if (retval && typeof retval === "object" && "id" in (retval as unknown as Record<string, unknown>)) {
+          return retval as unknown as DidDocument;
+        }
+        return scValToNative(retval) as DidDocument;
       } catch (err) {
         if (attempt === maxRetries || !isTransientRpcError(err)) throw err;
         lastError = err;
@@ -307,44 +308,10 @@ export class IdentityClient extends BaseClient {
     this.debug('sdk.simulation_result', { operation: 'identity.simulateTransaction', success: !isSimulationError });
     if (isSimulationError) return false;
 
-    const native = scValToNative(
+    return scValToNative(
       (result as SorobanRpc.Api.SimulateTransactionSuccessResponse)
         .result!.retval
-    );
-    return typeof native === "boolean" ? native : Boolean(native);
-  }
-
-  /**
-   * Lightweight existence check for a DID, regardless of activation status.
-   */
-  async exists(controllerAddress: string, options?: CallOptions): Promise<boolean> {
-    validateStellarAddress(controllerAddress);
-    const account = new Account(controllerAddress, "0");
-    const timeout = options?.timeoutSeconds ?? this.config.txTimeout ?? 30;
-
-    const tx = new TransactionBuilder(account, {
-      fee: BASE_FEE,
-      networkPassphrase: this.config.networkPassphrase,
-    })
-      .addOperation(
-        this.contract.call(
-          "did_exists",
-          ...buildDidExistsArgs({ controller: controllerAddress })
-        )
-      )
-      .setTimeout(timeout)
-      .build();
-
-    const result = await retryWithBackoff(() => this.server.simulateTransaction(tx));
-    const isSimulationError = SorobanRpc.Api.isSimulationError(result);
-    this.debug('sdk.simulation_result', { operation: 'identity.exists', success: !isSimulationError });
-    if (isSimulationError) return false;
-
-    const native = scValToNative(
-      (result as SorobanRpc.Api.SimulateTransactionSuccessResponse)
-        .result!.retval
-    );
-    return typeof native === "boolean" ? native : Boolean(native);
+    ) as boolean;
   }
 
   /**
@@ -416,8 +383,8 @@ export class IdentityClient extends BaseClient {
 
     const txHash = result.hash;
     await pollTransactionStatus(this.server, txHash, {
-      maxAttempts: this.config.pollingRetries,
-      intervalMs: this.config.pollingIntervalMs,
+      maxRetries: this.config.maxRetries ?? this.config.pollingRetries,
+      retryIntervalMs: this.config.retryIntervalMs ?? this.config.pollingIntervalMs,
       exponentialBackoff: this.config.pollingExponentialBackoff,
     });
     return { data: undefined, txHash };
