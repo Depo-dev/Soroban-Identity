@@ -24,6 +24,8 @@ const MAX_HISTORY: usize = 50;
 const PAGE_CAP: u32 = 100;
 /// Maximum number of submissions in a single batch_submit_score call.
 pub const MAX_BATCH_SIZE: u32 = 20;
+/// Seconds a dispute remains open before it expires automatically (~1 day).
+const DISPUTE_WINDOW_SECS: u64 = 86_400;
 
 /// Ledgers a dispute remains open before it expires automatically (~1 day at 5s/ledger).
 const DISPUTE_WINDOW_LEDGERS: u32 = 17_280;
@@ -158,6 +160,9 @@ impl Reputation {
     /// live-updatable via [`Self::set_min_interval`].
     pub fn initialize(env: Env, admin: Address) -> Result<(), ContractError> {
         Self::require_uninitialized(&env)?;
+        if rate_limit_window < MIN_RATE_LIMIT_WINDOW || rate_limit_window > MAX_RATE_LIMIT_WINDOW {
+            return Err(ContractError::InvalidRateLimitWindow);
+        }
         Self::set_admin(&env, &admin);
         env.storage()
             .instance()
@@ -199,13 +204,13 @@ impl Reputation {
         if stored != admin {
             return Err(ContractError::Unauthorized);
         }
-        if ledgers < MIN_INTERVAL_FLOOR || ledgers > MIN_INTERVAL_CEILING {
-            return Err(ContractError::InvalidMinInterval);
+        if window < MIN_RATE_LIMIT_WINDOW || window > MAX_RATE_LIMIT_WINDOW {
+            return Err(ContractError::InvalidRateLimitWindow);
         }
-        env.storage().instance().set(&MIN_INTERVAL_KEY, &ledgers);
+        env.storage().instance().set(&RATE_LIMIT_WIN, &window);
         env.events().publish(
-            (MIN_INTERVAL_KEY, symbol_short!("updated")),
-            (EVENT_VERSION, admin, ledgers),
+            (RATE_LIMIT_WIN, symbol_short!("updated")),
+            (EVENT_VERSION, admin, window),
         );
         Ok(())
     }
@@ -651,7 +656,6 @@ impl Reputation {
                 let disputed_delta = history.get(delta_index).unwrap().delta;
                 history.remove(delta_index);
 
-                let now = env.ledger().timestamp();
                 let rec_key = Self::record_key(&subject);
                 let mut record: ReputationRecord =
                     env.storage().persistent().get(&rec_key).unwrap_or(
@@ -674,9 +678,7 @@ impl Reputation {
                     env.storage().persistent().remove(&history_key);
                 } else {
                     env.storage().persistent().set(&history_key, &history);
-                    env.storage()
-                        .persistent()
-                        .extend_ttl(&history_key, TTL_MAX, TTL_MAX);
+                    env.storage().persistent().extend_ttl(&history_key, TTL_MAX, TTL_MAX);
                 }
 
                 env.storage().persistent().set(&rec_key, &record);
@@ -947,7 +949,7 @@ mod tests {
         let contract_id = env.register_contract(None, Reputation);
         let client = ReputationClient::new(&env, &contract_id);
         let admin = Address::generate(&env);
-        client.initialize(&admin);
+        client.initialize(&admin, &DEFAULT_RATE_LIMIT_WINDOW);
         (env, admin, client)
     }
 
@@ -976,7 +978,7 @@ mod tests {
         client.add_reporter(&reporter);
         let reason = String::from_str(&env, "completed KYC");
         client.submit_score(&reporter, &subject, &50, &reason);
-        env.ledger().with_mut(|li| li.sequence_number += 101);
+        env.ledger().with_mut(|li| li.timestamp += DEFAULT_RATE_LIMIT_WINDOW + 1);
         client.submit_score(&reporter, &subject, &25, &reason);
         let rec = client.get_reputation(&subject);
         assert_eq!(rec.score, 75);
@@ -1160,9 +1162,9 @@ mod tests {
     // ── #580: configurable rate-limit window ──────────────────────────────────
 
     #[test]
-    fn test_default_min_interval_used_on_init() {
+    fn test_default_rate_limit_window_used_on_init() {
         let (_env, _admin, client) = setup();
-        assert_eq!(client.get_min_interval(), DEFAULT_MIN_INTERVAL);
+        assert_eq!(client.get_rate_limit_window(), DEFAULT_RATE_LIMIT_WINDOW);
     }
 
     #[test]
@@ -1171,8 +1173,8 @@ mod tests {
         let reporter = Address::generate(&env);
         let subject = Address::generate(&env);
         client.add_reporter(&reporter);
-        client.set_min_interval(&admin, &20);
-        assert_eq!(client.get_min_interval(), 20);
+        client.set_rate_limit_window(&admin, &300);
+        assert_eq!(client.get_rate_limit_window(), 300);
 
         let reason = String::from_str(&env, "activity");
         client.submit_score(&reporter, &subject, &10, &reason);
@@ -1190,30 +1192,30 @@ mod tests {
     }
 
     #[test]
-    fn test_set_min_interval_floor_enforced() {
+    fn test_set_rate_limit_window_floor_enforced() {
         let (_env, admin, client) = setup();
         assert_eq!(
-            client.try_set_min_interval(&admin, &(MIN_INTERVAL_FLOOR - 1)),
-            Err(Ok(ContractError::InvalidMinInterval))
+            client.try_set_rate_limit_window(&admin, &(MIN_RATE_LIMIT_WINDOW - 1)),
+            Err(Ok(ContractError::InvalidRateLimitWindow))
         );
     }
 
     #[test]
-    fn test_set_min_interval_ceiling_enforced() {
+    fn test_set_rate_limit_window_ceiling_enforced() {
         let (_env, admin, client) = setup();
         assert_eq!(
-            client.try_set_min_interval(&admin, &(MIN_INTERVAL_CEILING + 1)),
-            Err(Ok(ContractError::InvalidMinInterval))
+            client.try_set_rate_limit_window(&admin, &(MAX_RATE_LIMIT_WINDOW + 1)),
+            Err(Ok(ContractError::InvalidRateLimitWindow))
         );
     }
 
     #[test]
-    fn test_set_min_interval_boundary_values_allowed() {
+    fn test_set_rate_limit_window_boundary_values_allowed() {
         let (_env, admin, client) = setup();
-        client.set_min_interval(&admin, &MIN_INTERVAL_FLOOR);
-        assert_eq!(client.get_min_interval(), MIN_INTERVAL_FLOOR);
-        client.set_min_interval(&admin, &MIN_INTERVAL_CEILING);
-        assert_eq!(client.get_min_interval(), MIN_INTERVAL_CEILING);
+        client.set_rate_limit_window(&admin, &MIN_RATE_LIMIT_WINDOW);
+        assert_eq!(client.get_rate_limit_window(), MIN_RATE_LIMIT_WINDOW);
+        client.set_rate_limit_window(&admin, &MAX_RATE_LIMIT_WINDOW);
+        assert_eq!(client.get_rate_limit_window(), MAX_RATE_LIMIT_WINDOW);
     }
 
     #[test]
@@ -1221,7 +1223,7 @@ mod tests {
         let (env, _admin, client) = setup();
         let attacker = Address::generate(&env);
         assert_eq!(
-            client.try_set_min_interval(&attacker, &500),
+            client.try_set_rate_limit_window(&attacker, &500),
             Err(Ok(ContractError::Unauthorized))
         );
     }

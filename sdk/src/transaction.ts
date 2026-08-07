@@ -6,6 +6,15 @@ export interface TxOptions {
   pollRetries?: number;
 }
 
+function isNetworkError(err: unknown): boolean {
+  const msg = (err instanceof Error ? err.message : String(err)).toLowerCase();
+  return /econnrefused|enotfound|fetch failed|econnreset|etimedout/.test(msg);
+}
+
+function getRpcUrl(server: SorobanRpc.Server): string {
+  return (server as unknown as { serverURL: string }).serverURL ?? "unknown";
+}
+
 export async function executeTransaction(
   server: SorobanRpc.Server,
   tx: Transaction,

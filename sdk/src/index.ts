@@ -27,6 +27,76 @@ export type { AccountInfo } from './types';
 
 // ── Presentation ──────────────────────────────────────────────────────────────
 export { PresentationClient } from './presentation';
+
+// ── Errors ────────────────────────────────────────────────────────────────────
+export {
+  SorobanIdentityError,
+  ContractError,
+  RateLimitError,
+  ClientDisposedError,
+  ClaimsValidationError,
+  classifyError,
+  wrapError,
+  parseContractError,
+} from './errors';
+export type { SorobanErrorCode, SorobanIdentityErrorInit } from './errors';
+
+// ── Error codes ───────────────────────────────────────────────────────────────
+export {
+  SorobanErrorCodes,
+  IDENTITY_REGISTRY_ERRORS,
+  CREDENTIAL_MANAGER_ERRORS,
+  REPUTATION_ERRORS,
+} from './error-codes';
+
+// ── Types ─────────────────────────────────────────────────────────────────────
+export {
+  UnknownCredentialTypeError,
+  assertCredentialType,
+  SimulationError,
+  validateConfig,
+} from './types';
+export type {
+  DidDocument,
+  ServiceEndpoint,
+  Credential,
+  RevokedCredential,
+  CredentialType,
+  CredentialListOptions,
+  VerifyResult,
+  VerifyFailReason,
+  SorobanIdentityConfig,
+  SorobanIdentityLogger,
+  ReputationRecord,
+  ScoreHistoryEntry,
+  AccountInfo,
+  CallOptions,
+  IdentityStorageStats,
+  CredentialStorageStats,
+  ReputationStorageStats,
+  Page,
+  PaginationOptions,
+  SorobanIdentityContractIdField,
+  ValidateConfigOptions,
+  SorobanResponse,
+  WriteResult,
+  FeeEstimate,
+} from './types';
+
+// ── Transaction helpers ───────────────────────────────────────────────────────
+export { executeTransaction } from './transaction';
+export type { TxOptions } from './transaction';
+
+// ── Events ────────────────────────────────────────────────────────────────────
+export { SorobanEventListener, getEvents, subscribeToEvents } from './events';
+export type {
+  SubscribeOptions,
+  EventFilter,
+  ContractEvent,
+  GetEventsOptions,
+} from './events';
+
+// ── Presentation ──────────────────────────────────────────────────────────────
 export type {
   VerifiablePresentation,
   VerifiableCredentialSubset,

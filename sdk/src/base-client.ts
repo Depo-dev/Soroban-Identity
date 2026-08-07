@@ -196,6 +196,9 @@ export abstract class BaseClient {
           if (
             !errorStr.includes("ECONNRESET") &&
             !errorStr.includes("ETIMEDOUT") &&
+            !errorStr.includes("ECONNREFUSED") &&
+            !errorStr.includes("ENOTFOUND") &&
+            !errorStr.includes("fetch failed") &&
             !errorStr.includes("503") &&
             !errorStr.includes("502") &&
             !errorStr.includes("504")
