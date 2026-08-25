@@ -10,6 +10,8 @@ import {
   readWebhooks,
   WebhookDeliveryService,
 } from "./webhooks.js";
+import { createDataLoaders } from "./dataloader.js";
+import { executeGraphQL, renderGraphiQLPlayground } from "./graphql.js";
 import {
   notFound,
   readJson,
@@ -76,6 +78,60 @@ export function createApp({ config, soroban, metrics, metricsAggregator, webhook
               .catch((error) => logger.error({ error: error.message, stack: error.stack }, 'Metrics refresh failed'));
           return sendText(res, 200, metrics.renderPrometheus());
         }
+
+        // ── GraphQL Endpoint ─────────────────────────────────────────
+        if (url.pathname === "/graphql") {
+          if (req.method === "GET") {
+            const queryParam = url.searchParams.get("query");
+            if (!queryParam) {
+              // Interactive GraphQL Playground in dev mode / browser requests
+              res.writeHead(200, { "content-type": "text/html; charset=utf-8" });
+              return res.end(renderGraphiQLPlayground());
+            }
+            let variables = {};
+            try {
+              const varsStr = url.searchParams.get("variables");
+              if (varsStr) variables = JSON.parse(varsStr);
+            } catch {
+              return sendJson(res, 400, { errors: [{ message: "Invalid variables JSON." }] });
+            }
+            const loaders = createDataLoaders({ config, soroban });
+            const result = await executeGraphQL({
+              query: queryParam,
+              variables,
+              context: { config, soroban, metrics, webhookService, loaders, req, res },
+            });
+            return sendJson(res, result.errors ? 400 : 200, result);
+          }
+
+          if (req.method === "POST") {
+            if (validateContentType(req, res)) return;
+            const body = await readJson(req, config);
+            if (body.__payloadTooLarge) {
+              return sendJson(res, 413, { code: "PAYLOAD_TOO_LARGE", message: "Request body exceeds the size limit." });
+            }
+            const { query, variables = {}, operationName } = body;
+            if (!query) {
+              return sendJson(res, 400, { errors: [{ message: "Must provide a GraphQL query." }] });
+            }
+
+            // Mutations require credentials:write or admin authorization
+            const isMutation = /^\s*mutation\b/i.test(query);
+            if (isMutation) {
+              if (!requireAuth(req, res, config, ["credentials:write"])) return;
+            }
+
+            const loaders = createDataLoaders({ config, soroban });
+            const result = await executeGraphQL({
+              query,
+              variables,
+              operationName,
+              context: { config, soroban, metrics, webhookService, loaders, req, res },
+            });
+            return sendJson(res, 200, result);
+          }
+        }
+
 
         // #390: paginated credential list
         if (req.method === "GET" && url.pathname === "/credentials") {
