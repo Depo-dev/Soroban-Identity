@@ -1,5 +1,7 @@
 import { URL } from "node:url";
 import crypto from "node:crypto";
+import fs from "node:fs/promises";
+import path from "node:path";
 import { appendAuditLog, readCredentials, writeCredentials, createAndPersistCredential, revokeAndPersistCredential, DuplicateCredentialError } from "./storage.js";
 import { findExpiringCredentials, paginate, paginateCursor } from "./expiry.js";
 import {
@@ -227,13 +229,29 @@ export function createApp({ config, soroban, metrics, metricsAggregator, webhook
           return sendJson(res, 200, { verified: true, credential });
         }
 
+        if (req.method === "GET" && pathname === "/openapi.json") {
+          try {
+            const openApiPath = path.resolve(process.cwd(), "openapi.json");
+            const content = await fs.readFile(openApiPath, "utf8");
+            return sendJson(res, 200, JSON.parse(content));
+          } catch {
+            try {
+              const fallbackPath = path.resolve(process.cwd(), "server/openapi.json");
+              const content = await fs.readFile(fallbackPath, "utf8");
+              return sendJson(res, 200, JSON.parse(content));
+            } catch (err) {
+              return sendJson(res, 500, { error: "openapi_spec_unavailable", message: err.message });
+            }
+          }
+        }
+
         if (
           pathname.startsWith("/admin/") &&
           !requireAdmin(req, res, config)
         )
           return;
 
-        if (req.method === "POST" && pathname === "/credentials") {
+        if (req.method === "POST" && (pathname === "/credentials" || pathname === "/credentials/issue")) {
           if (!requireAuth(req, res, config, ['credentials:write'])) return;
           if (validateContentType(req, res)) return;
           const body = await readJson(req, config);
