@@ -13,6 +13,7 @@ import {
   validateContentType,
 } from "./http-utils.js";
 import { requestContextStore } from "./request-context.js";
+import { handleEventsRequest } from "./sse.js";
 import { logger } from "./logger.js";
 const SERVER_VERSION = "0.1.0";
 const MIN_SDK_VERSION = "0.1.0";
@@ -59,6 +60,10 @@ export function createApp({ config, soroban, metrics, metricsAggregator }) {
             contracts,
             circuitBreaker: soroban.circuitBreaker.toHealthInfo(),
           });
+        }
+
+        if (req.method === "GET" && url.pathname === "/events") {
+          return handleEventsRequest(req, res, url, { config, soroban });
         }
 
         if (req.method === "GET" && url.pathname === "/metrics") {
