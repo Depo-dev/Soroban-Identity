@@ -1,4 +1,4 @@
-import { useState, useEffect, useReducer } from "react";
+import { useState, useEffect, useReducer, useRef } from "react";
 import { StrKey, SorobanRpc, TransactionBuilder, BASE_FEE, nativeToScVal, Contract, scValToNative } from '@stellar/stellar-sdk';
 import type { CredentialType, Credential, VerifyResult } from "../../../sdk/src/types";
 import { CredentialClient } from '../../../sdk/src';
@@ -16,23 +16,12 @@ type VerifyState =
   | "not_found"
   | "revoked"
   | "expired"
-  | "invalid";
+  | "invalid"
+  | "unknown";
 
 type FilterType = "All" | CredentialType;
 type ExpiryFilterType = "All" | "Active" | "Expired";
 type CredentialStatus = "active" | "expired" | "revoked";
-type Credential = {
-  id: string;
-  credentialType: CredentialType;
-  subject: string;
-  issuer: string;
-  claims: Record<string, string>;
-  claimsHash: string;
-  signature: string;
-  issuedAt: number;
-  expiresAt: number;
-  revoked: boolean;
-};
 
 function formatExpiry(expiresAt: number): string {
   if (expiresAt === 0) return "No expiry";
@@ -84,7 +73,7 @@ function getCredentialStatus(credential: Credential): CredentialStatus {
 
 function getStatusBadgeClass(status: CredentialStatus): string {
   if (status === "revoked") return "badge badge-red";
-  if (status === "expired") return "badge badge-gray";
+  if (status === "expired") return "badge badge-yellow";
   return "badge badge-green";
 }
 
@@ -246,17 +235,37 @@ export default function CredentialsPanel({ verifyId }: { verifyId?: string | nul
 
   const [searchAddress, setSearchAddress] = useState("");
 
+  // Reused across calls instead of instantiating a fresh CredentialClient (and its
+  // own RequestQueue + health check) on every verify/search/issuer-check — see #612.
+  const credentialClientRef = useRef<CredentialClient | null>(null);
+  const getCredentialClient = () => {
+    if (!credentialClientRef.current) {
+      credentialClientRef.current = new CredentialClient(getNetworkConfig());
+    }
+    return credentialClientRef.current;
+  };
+  useEffect(() => {
+    return () => {
+      credentialClientRef.current?.dispose();
+      credentialClientRef.current = null;
+    };
+  }, []);
+
   const handleVerify = async (credentialId?: string) => {
     const id = (credentialId ?? credId).trim();
     if (!id) return;
     setVerifying(true);
     setVerifyState("idle");
     try {
-      const networkConfig = getNetworkConfig();
-      const credentialClient = new CredentialClient(networkConfig);
+      const credentialClient = getCredentialClient();
       const caller = wallet.publicKey || "GAAZI4TCR3TY5OJHCTJC2A4QSY6CJWJH5IAJTGKIN2ER7LBNVKOCCWN";
       const result = await credentialClient.verifyCredential(caller, id);
-      setVerifyState(result.valid ? "valid" : result.reason || "invalid");
+      const reason = result.reason;
+      const knownReason: VerifyState =
+        reason === "not_found" || reason === "revoked" || reason === "expired" || reason === "unknown"
+          ? reason
+          : "invalid";
+      setVerifyState(result.valid ? "valid" : knownReason);
     } catch {
       setVerifyState("invalid");
     } finally {
@@ -274,8 +283,7 @@ export default function CredentialsPanel({ verifyId }: { verifyId?: string | nul
     const checkIssuerStatus = async () => {
       setCheckingIssuer(true);
       try {
-        const networkConfig = getNetworkConfig();
-        const credentialClient = new CredentialClient(networkConfig);
+        const credentialClient = getCredentialClient();
         const caller = wallet.publicKey || "GAAZI4TCR3TY5OJHCTJC2A4QSY6CJWJH5IAJTGKIN2ER7LBNVKOCCWN";
         const issuer = await credentialClient.isIssuer(caller, wallet.publicKey!);
         setIsIssuer(issuer);
@@ -311,8 +319,7 @@ export default function CredentialsPanel({ verifyId }: { verifyId?: string | nul
     
     dispatchCredential({ type: 'FETCH_START' });
     try {
-      const networkConfig = getNetworkConfig();
-      const credentialClient = new CredentialClient(networkConfig);
+      const credentialClient = getCredentialClient();
       const caller = wallet.publicKey || "GAAZI4TCR3TY5OJHCTJC2A4QSY6CJWJH5IAJTGKIN2ER7LBNVKOCCWN";
       const results = await credentialClient.getCredentialsBySubject(caller, addr);
       dispatchCredential({ type: 'FETCH_SUCCESS', credentials: results, searchedAddress: addr });
@@ -385,8 +392,8 @@ export default function CredentialsPanel({ verifyId }: { verifyId?: string | nul
   );
 
   const handleIssue = async () => {
-    if (!wallet.connected) return;
-    
+    if (!wallet.connected || !wallet.publicKey) return;
+
     if (!validateIssueForm()) return;
 
     setIssuing(true);
@@ -574,12 +581,13 @@ export default function CredentialsPanel({ verifyId }: { verifyId?: string | nul
                   style={{
                     padding: "0.6rem 1rem",
                     display: "flex",
+                    flexWrap: "wrap",
                     justifyContent: "space-between",
                     alignItems: "center",
                     width: "100%",
                     fontSize: "0.85rem",
                     color: "var(--text)",
-                    gap: "1rem",
+                    gap: "0.5rem 1rem",
                     cursor: "pointer",
                     background: "var(--cred-item-bg)",
                     border: 0,
@@ -591,7 +599,9 @@ export default function CredentialsPanel({ verifyId }: { verifyId?: string | nul
                   <span style={{ fontSize: "1.2rem", minWidth: "1.5rem" }}>
                     {CREDENTIAL_TYPE_ICONS[cred.credentialType] || "📋"}
                   </span>
-                  <span style={{ fontFamily: "monospace", color: "var(--text-muted)" }}>{cred.id}</span>
+                  <span style={{ fontFamily: "monospace", color: "var(--text-muted)" }} title={cred.id}>
+                    {cred.id.slice(0, 8)}…{cred.id.slice(-6)}
+                  </span>
                   <span className="badge badge-green">{cred.credentialType}</span>
                   <span
                     className={getStatusBadgeClass(status)}
@@ -686,7 +696,7 @@ export default function CredentialsPanel({ verifyId }: { verifyId?: string | nul
             {verifyState === "not_found" && (
               <span className="badge badge-red">Invalid — credential not found</span>
             )}
-            {(verifyState === "invalid" || verifyState === "unknown" as string) && (
+            {(verifyState === "invalid" || verifyState === "unknown") && (
               <span className="badge badge-red">Invalid</span>
             )}
           </div>
