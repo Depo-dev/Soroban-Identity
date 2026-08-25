@@ -78,25 +78,10 @@ export function toCredentialExpiry(dateOrMs: Date | number): number {
   return Math.floor(ms / 1000);
 }
 
-export interface CredentialInput {
-  issuerKeypair: Keypair;
-  subjectAddress: string;
-  credentialType: CredentialType;
-  claims: Record<string, string>;
-  claimsHashHex: string;
-  expiresAt?: number;
-  options?: CallOptions & { nonce?: string; schemaId?: string };
-  signatureHex?: string;
-}
-
-export interface BatchOptions {
-  concurrency?: number;
-}
-
-export interface BatchResult {
-  succeeded: Array<SorobanResponse<{ credentialId: string } & WriteResult>>;
-  failed: Array<{ input: CredentialInput; error: SorobanIdentityError }>;
-}
+/** Contract error codes returned by credential-manager — see {@link CREDENTIAL_MANAGER_ERRORS}. */
+const CREDENTIAL_NOT_FOUND_CODE = 3;
+const CREDENTIAL_REVOKED_CODE = 4;
+const CREDENTIAL_EXPIRED_CODE = 9;
 
 /**
  * Client for the credential-manager contract.
@@ -526,7 +511,7 @@ export class CredentialClient extends BaseClient {
       );
     }
 
-    const ajv = new AjvCtor({ allErrors: true });
+    const ajv = new Ajv({ allErrors: true });
     const validate = ajv.compile(schema);
     const valid = validate(claims);
     if (!valid) {
@@ -574,6 +559,13 @@ export class CredentialClient extends BaseClient {
 
     if (isSimulationError) {
       const error: string = (result as { error: string }).error ?? "";
+      const contractErr = ContractError.extract(error, CREDENTIAL_MANAGER_ERRORS);
+      if (contractErr) {
+        if (contractErr.code === CREDENTIAL_NOT_FOUND_CODE) return { valid: false, reason: 'not_found' };
+        if (contractErr.code === CREDENTIAL_REVOKED_CODE) return { valid: false, reason: 'revoked' };
+        if (contractErr.code === CREDENTIAL_EXPIRED_CODE) return { valid: false, reason: 'expired' };
+        return { valid: false, reason: 'unknown' };
+      }
       const lowerError = error.toLowerCase();
       if (lowerError.includes('not found') || lowerError.includes('credentialnotfound')) {
         return { valid: false, reason: 'not_found' };

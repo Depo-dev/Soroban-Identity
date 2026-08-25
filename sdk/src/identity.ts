@@ -40,6 +40,22 @@ function isTransientRpcError(err: unknown): boolean {
   );
 }
 
+/** `IDENTITY_REGISTRY_ERRORS` code for "DID not found". */
+const DID_NOT_FOUND_CODE = 1;
+
+/**
+ * A DID resolved immediately after `createDid` can briefly appear "not found"
+ * if the RPC node that serves the read hasn't caught up with the node the
+ * write landed on. Treat NOT_FOUND as retryable here (unlike other reads) so
+ * that window resolves itself instead of surfacing a false negative.
+ */
+function isRetryableResolveError(err: unknown): boolean {
+  if (isTransientRpcError(err)) return true;
+  if (err instanceof ContractError) return err.code === DID_NOT_FOUND_CODE;
+  if (err instanceof SorobanIdentityError) return err.code === "NOT_FOUND";
+  return false;
+}
+
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
@@ -244,7 +260,7 @@ export class IdentityClient extends BaseClient {
       .setTimeout(timeout)
       .build();
 
-    const maxRetries = options?.maxRetries ?? this.config.maxRetries ?? 3;
+    const maxRetries = options?.maxRetries ?? this.config.maxRetries ?? 5;
     const baseDelayMs = options?.baseDelayMs ?? this.config.baseDelayMs ?? 500;
     const backoffFactor = options?.backoffFactor ?? this.config.backoffFactor ?? 2;
 
@@ -272,7 +288,7 @@ export class IdentityClient extends BaseClient {
         }
         return scValToNative(retval) as DidDocument;
       } catch (err) {
-        if (attempt === maxRetries || !isTransientRpcError(err)) throw err;
+        if (attempt === maxRetries || !isRetryableResolveError(err)) throw err;
         lastError = err;
         const delayMs = Math.floor(baseDelayMs * Math.pow(backoffFactor, attempt) + Math.random() * 100);
         this.debug(`[identity] resolveDID retry ${attempt + 1}/${maxRetries} after ${delayMs}ms`, {});

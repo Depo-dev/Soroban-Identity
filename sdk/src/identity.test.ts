@@ -196,14 +196,41 @@ describe('resolveDid — retry on transient RPC failures (#352)', () => {
     expect(mockSimulateTransaction).toHaveBeenCalledTimes(3);
   });
 
-  it('does not retry on 404 and rejects immediately', async () => {
+  it('retries a not-yet-propagated DID (#618) and resolves once the write lands', async () => {
+    const mockDidDoc: DidDocument = {
+      id: 'did:stellar:GABC',
+      controller: 'GABC',
+      metadata: {},
+      createdAt: 1000,
+      updatedAt: 1000,
+      active: true,
+    };
+
+    mockIsSimulationError
+      .mockReturnValueOnce(true)
+      .mockReturnValueOnce(true)
+      .mockReturnValueOnce(false);
+    mockSimulateTransaction
+      .mockResolvedValueOnce({ error: 'DidNotFound' })
+      .mockResolvedValueOnce({ error: 'DidNotFound' })
+      .mockResolvedValueOnce({ result: { retval: mockDidDoc } });
+
+    const result = await client.resolveDid('GABC', {
+      maxRetries: 3,
+      baseDelayMs: 0,
+    });
+    expect(result).toEqual(mockDidDoc);
+    expect(mockSimulateTransaction).toHaveBeenCalledTimes(3);
+  });
+
+  it('gives up with NOT_FOUND once retries are exhausted for a DID that truly does not exist', async () => {
     mockIsSimulationError.mockReturnValue(true);
     mockSimulateTransaction.mockResolvedValue({ error: 'DidNotFound' });
 
     await expect(
       client.resolveDid('GABC', { maxRetries: 3, baseDelayMs: 0 })
-    ).rejects.toThrow('NOT_FOUND' || 'No DID found');
-    expect(mockSimulateTransaction).toHaveBeenCalledTimes(1);
+    ).rejects.toThrow('No DID found');
+    expect(mockSimulateTransaction).toHaveBeenCalledTimes(4);
   });
 
   it('setting maxRetries: 0 disables retries entirely', async () => {
