@@ -402,6 +402,71 @@ paths:
                         enum: [not_found, revoked, expired]
                         description: Machine-readable failure reason.
 
+  /credentials/verify/batch:
+    post:
+      tags: [credentials]
+      summary: Verify multiple credentials in a single batch request.
+      description: |
+        Verifies up to 50 credentials in a single request for efficiency.
+        Supports partial success handling, returning verification results
+        for each supplied credential ID.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [ids]
+              properties:
+                ids:
+                  type: array
+                  maxItems: 50
+                  items:
+                    type: string
+                  description: Array of hex-encoded 32-byte credential IDs (max 50).
+            example:
+              ids:
+                - "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+                - "fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210"
+      responses:
+        '200':
+          description: Batch verification results.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [results, total, verifiedCount]
+                properties:
+                  results:
+                    type: array
+                    items:
+                      type: object
+                      required: [id, verified]
+                      properties:
+                        id:
+                          type: string
+                        verified:
+                          type: boolean
+                        reason:
+                          type: string
+                          enum: [not_found, revoked, expired, invalid_id]
+                        credential:
+                          $ref: '#/components/schemas/Credential'
+                  total:
+                    type: integer
+                    description: Total number of credentials checked.
+                  verifiedCount:
+                    type: integer
+                    description: Total number of credentials successfully verified.
+        '400':
+          description: Invalid request payload or batch size exceeds 50.
+        '401':
+          description: Unauthorized.
+        '413':
+          description: Payload too large.
+        '415':
+          description: Unsupported media type.
+
   /credentials/by-subject/{subject}:
     parameters:
       - { in: path, name: subject, required: true, schema: { type: string } }

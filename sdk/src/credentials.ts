@@ -603,6 +603,32 @@ export class CredentialClient extends BaseClient {
   }
 
   /**
+   * Verify multiple credentials in a batch with partial success handling.
+   * Up to 50 credentials can be verified in a single call.
+   */
+  async verifyCredentialBatch(
+    callerAddress: string,
+    credentialIds: string[],
+    options?: CallOptions & { concurrency?: number }
+  ): Promise<Array<{ id: string } & VerifyResult>> {
+    if (!Array.isArray(credentialIds)) {
+      throw new SorobanIdentityError("credentialIds must be an array", "INVALID_INPUT");
+    }
+    if (credentialIds.length > 50) {
+      throw new SorobanIdentityError("credentialIds cannot exceed 50 items", "INVALID_INPUT");
+    }
+    const concurrency = options?.concurrency ?? 5;
+    return runConcurrent(credentialIds, concurrency, async (id) => {
+      try {
+        const result = await this.verifyCredential(callerAddress, id, options);
+        return { id, ...result };
+      } catch {
+        return { id, valid: false, reason: "unknown" };
+      }
+    });
+  }
+
+  /**
    * Get all credentials issued to a subject address.
    */
   async getCredentialsBySubject(

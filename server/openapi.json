@@ -80,6 +80,68 @@
           }
         }
       }
+    },
+    "/credentials/verify/batch": {
+      "post": {
+        "summary": "Verify multiple credentials in a single batch request",
+        "description": "Verifies up to 50 credentials in a single request for efficiency with partial success handling.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": ["ids"],
+                "properties": {
+                  "ids": {
+                    "type": "array",
+                    "maxItems": 50,
+                    "items": {
+                      "type": "string"
+                    }
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Batch verification results",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": ["results", "total", "verifiedCount"],
+                  "properties": {
+                    "results": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "required": ["id", "verified"],
+                        "properties": {
+                          "id": { "type": "string" },
+                          "verified": { "type": "boolean" },
+                          "reason": { "type": "string" },
+                          "credential": { "type": "object" }
+                        }
+                      }
+                    },
+                    "total": { "type": "integer" },
+                    "verifiedCount": { "type": "integer" }
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid request format or limit exceeded"
+          },
+          "401": {
+            "description": "Unauthorized"
+          }
+        }
+      }
     }
   }
 }

@@ -94,6 +94,59 @@ export function createApp({ config, soroban, metrics, metricsAggregator }) {
           return sendJson(res, 200, credential);
         }
 
+        // #678: Bulk credential verification endpoint
+        if (req.method === "POST" && url.pathname === "/credentials/verify/batch") {
+          if (!requireAuth(req, res, config, ['credentials:read'])) return;
+          if (validateContentType(req, res)) return;
+
+          const body = await readJson(req, config);
+          if (body.__payloadTooLarge) {
+            return sendJson(res, 413, { code: "PAYLOAD_TOO_LARGE", message: "Request body exceeds the size limit." });
+          }
+
+          const ids = Array.isArray(body) ? body : (body.ids ?? body.credentialIds);
+          if (!Array.isArray(ids) || ids.length === 0) {
+            return sendJson(res, 400, {
+              code: "INVALID_REQUEST",
+              message: "Request body must include an array of credential IDs.",
+            });
+          }
+
+          if (ids.length > 50) {
+            return sendJson(res, 400, {
+              code: "INVALID_REQUEST",
+              message: "Batch size exceeds limit of 50 credentials per request.",
+            });
+          }
+
+          const credentials = await readCredentials(config);
+          const credMap = new Map(credentials.map((c) => [c.id, c]));
+          const now = Math.floor(Date.now() / 1000);
+
+          const results = ids.map((id) => {
+            if (typeof id !== "string" || !id.trim()) {
+              return { id, verified: false, reason: "invalid_id" };
+            }
+            const credential = credMap.get(id);
+            if (!credential) {
+              return { id, verified: false, reason: "not_found" };
+            }
+            if (credential.revoked) {
+              return { id, verified: false, reason: "revoked" };
+            }
+            if (credential.expiresAt > 0 && credential.expiresAt < now) {
+              return { id, verified: false, reason: "expired" };
+            }
+            return { id, verified: true, credential };
+          });
+
+          return sendJson(res, 200, {
+            results,
+            total: results.length,
+            verifiedCount: results.filter((r) => r.verified).length,
+          });
+        }
+
         const verifyMatch = url.pathname.match(/^\/credentials\/([^/]+)\/verify$/);
         if (req.method === "POST" && verifyMatch) {
           // Verify endpoint requires credentials:read scope
