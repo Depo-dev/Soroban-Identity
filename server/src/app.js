@@ -13,6 +13,13 @@ import {
 import { createDataLoaders } from "./dataloader.js";
 import { executeGraphQL, renderGraphiQLPlayground } from "./graphql.js";
 import {
+  resolveApiVersion,
+  setVersionHeaders,
+  SUPPORTED_VERSIONS,
+  DEFAULT_VERSION,
+  DEPRECATED_VERSIONS,
+} from "./versioning.js";
+import {
   notFound,
   readJson,
   requireAdmin,
@@ -26,7 +33,13 @@ import { requestContextStore } from "./request-context.js";
 import { logger } from "./logger.js";
 const SERVER_VERSION = "0.1.0";
 const MIN_SDK_VERSION = "0.1.0";
-const SERVER_FEATURES = ["webhook_delivery", "batch_issuance", "event_polling"];
+const SERVER_FEATURES = [
+  "webhook_delivery",
+  "batch_issuance",
+  "event_polling",
+  "graphql_api",
+  "api_versioning",
+];
 
 export function createApp({ config, soroban, metrics, metricsAggregator, webhookService = new WebhookDeliveryService(config) }) {
   return function app(req, res) {
@@ -35,8 +48,15 @@ export function createApp({ config, soroban, metrics, metricsAggregator, webhook
       `http://${req.headers.host ?? "localhost"}`,
     );
 
+    // Resolve API version and normalized pathname
+    const { version, normalizedPath, isExplicitUrlVersion, isDeprecated } = resolveApiVersion(req, url);
+    const pathname = normalizedPath;
+
+    // Set API Version and Deprecation response headers
+    setVersionHeaders(res, { version, isDeprecated, isExplicitUrlVersion });
+
     // Check if this is the metrics endpoint before setting X-Request-ID
-    const isMetricsEndpoint = req.method === "GET" && url.pathname === "/metrics";
+    const isMetricsEndpoint = req.method === "GET" && pathname === "/metrics";
     
     // Generate requestId for all endpoints except metrics
     const requestId = isMetricsEndpoint ? null : (req.headers["x-request-id"] || crypto.randomUUID());
@@ -53,25 +73,31 @@ export function createApp({ config, soroban, metrics, metricsAggregator, webhook
 
     return requestContextStore.run({ requestId }, async () => {
       try {
-        if (req.method === "GET" && url.pathname === "/info") {
+        if (req.method === "GET" && pathname === "/info") {
           return sendJson(res, 200, {
             version: SERVER_VERSION,
+            apiVersion: version,
+            supportedVersions: SUPPORTED_VERSIONS,
             features: SERVER_FEATURES,
             minSdkVersion: MIN_SDK_VERSION,
           });
         }
 
-        if (req.method === "GET" && url.pathname === "/health") {
+        if (req.method === "GET" && pathname === "/health") {
           const contracts = await soroban.pingAllContracts();
           const ok = Object.values(contracts).every(Boolean);
           return sendJson(res, ok ? 200 : 503, {
             status: ok ? "ok" : "degraded",
+            apiVersion: version,
+            supportedVersions: SUPPORTED_VERSIONS,
+            deprecatedVersions: DEPRECATED_VERSIONS,
+            defaultVersion: DEFAULT_VERSION,
             contracts,
             circuitBreaker: soroban.circuitBreaker.toHealthInfo(),
           });
         }
 
-        if (req.method === "GET" && url.pathname === "/metrics") {
+        if (req.method === "GET" && pathname === "/metrics") {
           if (metricsAggregator)
             await metricsAggregator
               .refresh()
@@ -80,7 +106,7 @@ export function createApp({ config, soroban, metrics, metricsAggregator, webhook
         }
 
         // ── GraphQL Endpoint ─────────────────────────────────────────
-        if (url.pathname === "/graphql") {
+        if (pathname === "/graphql") {
           if (req.method === "GET") {
             const queryParam = url.searchParams.get("query");
             if (!queryParam) {
@@ -134,7 +160,7 @@ export function createApp({ config, soroban, metrics, metricsAggregator, webhook
 
 
         // #390: paginated credential list
-        if (req.method === "GET" && url.pathname === "/credentials") {
+        if (req.method === "GET" && pathname === "/credentials") {
           const limitParam = url.searchParams.get("limit") ?? "50";
           const limitNum = Number.parseInt(limitParam, 10) || 50;
           if (limitNum > 200) {
@@ -145,20 +171,42 @@ export function createApp({ config, soroban, metrics, metricsAggregator, webhook
             limit: limitNum,
             cursor: url.searchParams.get("cursor"),
           });
+          if (version === "v2") {
+            return sendJson(res, 200, {
+              apiVersion: "v2",
+              data: {
+                items,
+                pageInfo: {
+                  nextCursor,
+                  hasNextPage: Boolean(nextCursor),
+                  count: items.length,
+                },
+              },
+              meta: {
+                timestamp: new Date().toISOString(),
+              },
+            });
+          }
           return sendJson(res, 200, { items, nextCursor });
         }
 
         // Single-item GET /credentials/:id
-        const credentialIdMatch = url.pathname.match(/^\/credentials\/([^/]+)$/);
+        const credentialIdMatch = pathname.match(/^\/credentials\/([^/]+)$/);
         if (req.method === "GET" && credentialIdMatch) {
           const credentialId = decodeURIComponent(credentialIdMatch[1]);
           const credentials = await readCredentials(config);
           const credential = credentials.find((c) => c.id === credentialId);
           if (!credential) return notFound(res);
+          if (version === "v2") {
+            return sendJson(res, 200, {
+              apiVersion: "v2",
+              data: credential,
+            });
+          }
           return sendJson(res, 200, credential);
         }
 
-        const verifyMatch = url.pathname.match(/^\/credentials\/([^/]+)\/verify$/);
+        const verifyMatch = pathname.match(/^\/credentials\/([^/]+)\/verify$/);
         if (req.method === "POST" && verifyMatch) {
           // Verify endpoint requires credentials:read scope
           if (!requireAuth(req, res, config, ['credentials:read'])) return;
@@ -180,12 +228,12 @@ export function createApp({ config, soroban, metrics, metricsAggregator, webhook
         }
 
         if (
-          url.pathname.startsWith("/admin/") &&
+          pathname.startsWith("/admin/") &&
           !requireAdmin(req, res, config)
         )
           return;
 
-        if (req.method === "POST" && url.pathname === "/credentials") {
+        if (req.method === "POST" && pathname === "/credentials") {
           if (!requireAuth(req, res, config, ['credentials:write'])) return;
           if (validateContentType(req, res)) return;
           const body = await readJson(req, config);
@@ -211,8 +259,8 @@ export function createApp({ config, soroban, metrics, metricsAggregator, webhook
         }
 
         // Credential revocation: DELETE /credentials/:id/revoke or POST /credentials/:id/revoke or DELETE /credentials/:id
-        const revokeMatch = url.pathname.match(/^\/credentials\/([^/]+)(\/revoke)?$/);
-        if ((req.method === "DELETE" || (req.method === "POST" && url.pathname.endsWith("/revoke"))) && revokeMatch) {
+        const revokeMatch = pathname.match(/^\/credentials\/([^/]+)(\/revoke)?$/);
+        if ((req.method === "DELETE" || (req.method === "POST" && pathname.endsWith("/revoke"))) && revokeMatch) {
           if (!requireAuth(req, res, config, ['credentials:write'])) return;
           const credentialId = decodeURIComponent(revokeMatch[1]);
           const revoked = await revokeAndPersistCredential(config, credentialId);
@@ -223,13 +271,13 @@ export function createApp({ config, soroban, metrics, metricsAggregator, webhook
         }
 
         // ── Webhook Endpoints ──────────────────────────────────────────
-        if (req.method === "GET" && url.pathname === "/webhooks") {
+        if (req.method === "GET" && pathname === "/webhooks") {
           if (!requireAuth(req, res, config, ['admin:read'])) return;
           const webhooks = await readWebhooks(config);
           return sendJson(res, 200, { webhooks });
         }
 
-        if (req.method === "POST" && url.pathname === "/webhooks") {
+        if (req.method === "POST" && pathname === "/webhooks") {
           if (!requireAuth(req, res, config, ['admin:write'])) return;
           if (validateContentType(req, res)) return;
           const body = await readJson(req, config);
@@ -246,7 +294,7 @@ export function createApp({ config, soroban, metrics, metricsAggregator, webhook
           return sendJson(res, 201, webhook);
         }
 
-        if (req.method === "GET" && url.pathname === "/webhooks/logs") {
+        if (req.method === "GET" && pathname === "/webhooks/logs") {
           if (!requireAuth(req, res, config, ['admin:read'])) return;
           const limit = Number.parseInt(url.searchParams.get("limit") ?? "50", 10) || 50;
           const webhookId = url.searchParams.get("webhookId");
@@ -254,8 +302,8 @@ export function createApp({ config, soroban, metrics, metricsAggregator, webhook
           return sendJson(res, 200, { logs });
         }
 
-        const webhookTestMatch = url.pathname.match(/^\/webhooks\/([^/]+)\/test$/);
-        if (req.method === "POST" && (webhookTestMatch || url.pathname === "/webhooks/test")) {
+        const webhookTestMatch = pathname.match(/^\/webhooks\/([^/]+)\/test$/);
+        if (req.method === "POST" && (webhookTestMatch || pathname === "/webhooks/test")) {
           if (!requireAuth(req, res, config, ['admin:write'])) return;
           let webhook;
           if (webhookTestMatch) {
@@ -277,7 +325,7 @@ export function createApp({ config, soroban, metrics, metricsAggregator, webhook
           return sendJson(res, 200, testResult);
         }
 
-        const webhookLogsMatch = url.pathname.match(/^\/webhooks\/([^/]+)\/logs$/);
+        const webhookLogsMatch = pathname.match(/^\/webhooks\/([^/]+)\/logs$/);
         if (req.method === "GET" && webhookLogsMatch) {
           if (!requireAuth(req, res, config, ['admin:read'])) return;
           const webhookId = decodeURIComponent(webhookLogsMatch[1]);
@@ -286,8 +334,8 @@ export function createApp({ config, soroban, metrics, metricsAggregator, webhook
           return sendJson(res, 200, { logs });
         }
 
-        const webhookIdMatch = url.pathname.match(/^\/webhooks\/([^/]+)$/);
-        if (req.method === "GET" && webhookIdMatch && url.pathname !== "/webhooks/logs") {
+        const webhookIdMatch = pathname.match(/^\/webhooks\/([^/]+)$/);
+        if (req.method === "GET" && webhookIdMatch && pathname !== "/webhooks/logs") {
           if (!requireAuth(req, res, config, ['admin:read'])) return;
           const id = decodeURIComponent(webhookIdMatch[1]);
           const webhook = await getWebhookRecord(config, id);
@@ -303,7 +351,7 @@ export function createApp({ config, soroban, metrics, metricsAggregator, webhook
           return sendJson(res, 200, { success: true, id });
         }
 
-        if (req.method === "GET" && url.pathname === "/admin/issuers") {
+        if (req.method === "GET" && pathname === "/admin/issuers") {
           // Reading issuers requires admin:read or wildcard scope
           if (!requireAuth(req, res, config, ['admin:read'])) return;
           
@@ -311,7 +359,7 @@ export function createApp({ config, soroban, metrics, metricsAggregator, webhook
           return sendJson(res, 200, { issuers });
         }
 
-        if (req.method === "POST" && url.pathname === "/admin/issuers") {
+        if (req.method === "POST" && pathname === "/admin/issuers") {
           if (validateContentType(req, res)) return;
           const body = await readJson(req, config);
           if (body.__payloadTooLarge)
@@ -327,7 +375,7 @@ export function createApp({ config, soroban, metrics, metricsAggregator, webhook
           return sendJson(res, 201, { issuer: body.issuer });
         }
 
-        if (req.method === "DELETE" && url.pathname === "/admin/issuers") {
+        if (req.method === "DELETE" && pathname === "/admin/issuers") {
           // Removing issuers requires admin:write scope
           if (!requireAuth(req, res, config, ['admin:write'])) return;
           
@@ -345,7 +393,7 @@ export function createApp({ config, soroban, metrics, metricsAggregator, webhook
           return sendJson(res, 200, { issuer });
         }
 
-        if (req.method === "GET" && url.pathname === "/admin/expiry-report") {
+        if (req.method === "GET" && pathname === "/admin/expiry-report") {
           // Reading expiry reports requires admin:read scope
           if (!requireAuth(req, res, config, ['admin:read'])) return;
           
