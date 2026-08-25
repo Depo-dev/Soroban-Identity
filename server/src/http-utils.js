@@ -110,16 +110,7 @@ export function notFound(res) {
  * @param {string[]} requiredScopes - Array of required scopes (e.g., ['credentials:write'])
  * @returns {boolean} True if authenticated and authorized, false otherwise
  */
-export function requireAuth(req, res, config, requiredScopes = []) {
-  if (!config.adminApiKey) {
-    sendJson(res, 503, { 
-      error: "admin_api_key_not_configured",
-      code: "SERVICE_UNAVAILABLE",
-      message: "API key authentication is not configured"
-    });
-    return false;
-  }
-  
+export async function requireAuth(req, res, config, requiredScopes = []) {
   const token =
     req.headers["x-api-key"] ||
     req.headers.authorization?.replace(/^Bearer\s+/i, "");
@@ -129,6 +120,46 @@ export function requireAuth(req, res, config, requiredScopes = []) {
       error: "unauthorized",
       code: "UNAUTHORIZED",
       message: "Missing API key"
+    });
+    return false;
+  }
+
+  // 1. Try validating with ApiKeyService if available
+  if (config.apiKeyService) {
+    const keyRecord = await config.apiKeyService.validateKey(token);
+    if (keyRecord) {
+      req.apiKeyId = keyRecord.id;
+      req.apiKeyScopes = keyRecord.scopes || ['*'];
+      req.userTier = keyRecord.tier || 'free';
+      req.auth = { apiKey: keyRecord };
+
+      if (requiredScopes.length > 0) {
+        const hasWildcard = req.apiKeyScopes.includes('*');
+        const hasAllScopes = requiredScopes.every(required => 
+          hasWildcard || req.apiKeyScopes.includes(required)
+        );
+        
+        if (!hasAllScopes) {
+          const missingScopes = requiredScopes.filter(s => !req.apiKeyScopes.includes(s));
+          sendJson(res, 403, { 
+            error: "forbidden",
+            code: "INSUFFICIENT_SCOPE",
+            message: "API key does not have required permissions",
+            requiredScopes,
+            missingScopes
+          });
+          return false;
+        }
+      }
+      return true;
+    }
+  }
+
+  if (!config.adminApiKey) {
+    sendJson(res, 503, { 
+      error: "admin_api_key_not_configured",
+      code: "SERVICE_UNAVAILABLE",
+      message: "API key authentication is not configured"
     });
     return false;
   }

@@ -15,12 +15,22 @@ import {
 import { requestContextStore } from "./request-context.js";
 import { logger } from "./logger.js";
 import { TieredRateLimiter } from "./rate-limiter.js";
+import { ApiKeyService } from "./api-keys.js";
 const SERVER_VERSION = "0.1.0";
 const MIN_SDK_VERSION = "0.1.0";
-const SERVER_FEATURES = ["webhook_delivery", "batch_issuance", "event_polling", "tiered_rate_limiting"];
+const SERVER_FEATURES = ["webhook_delivery", "batch_issuance", "event_polling", "tiered_rate_limiting", "api_key_auth"];
 
-export function createApp({ config, soroban, metrics, metricsAggregator, rateLimiter = new TieredRateLimiter() }) {
-  return function app(req, res) {
+export function createApp({
+  config,
+  soroban,
+  metrics,
+  metricsAggregator,
+  apiKeyService = new ApiKeyService(config),
+  rateLimiter = new TieredRateLimiter(),
+}) {
+  config.apiKeyService = apiKeyService;
+
+  return async function app(req, res) {
     const url = new URL(
       req.url,
       `http://${req.headers.host ?? "localhost"}`,
@@ -42,13 +52,24 @@ export function createApp({ config, soroban, metrics, metricsAggregator, rateLim
       return res.writeHead(204).end();
     }
 
-    // Extract tier from API key or headers early if present
+    // Extract tier and API key ID from API key or headers early if present
     const authHeader = req.headers["authorization"] || req.headers["x-api-key"];
     if (authHeader) {
       const token = typeof authHeader === "string" ? authHeader.replace(/^Bearer\s+/i, "") : "";
-      const parts = token.split(":");
-      if (parts.length >= 2 && ["free", "pro", "enterprise"].includes(parts[1].toLowerCase())) {
-        req.userTier = parts[1].toLowerCase();
+      try {
+        const keyRecord = await apiKeyService.validateKey(token);
+        if (keyRecord) {
+          req.apiKeyId = keyRecord.id;
+          req.userTier = keyRecord.tier || 'free';
+          req.auth = { apiKey: keyRecord };
+        } else {
+          const parts = token.split(":");
+          if (parts.length >= 2 && ["free", "pro", "enterprise"].includes(parts[1].toLowerCase())) {
+            req.userTier = parts[1].toLowerCase();
+          }
+        }
+      } catch {
+        // fallback
       }
     }
     if (req.headers["x-user-tier"]) {
@@ -148,7 +169,7 @@ export function createApp({ config, soroban, metrics, metricsAggregator, rateLim
 
         // #678: Bulk credential verification endpoint
         if (req.method === "POST" && url.pathname === "/credentials/verify/batch") {
-          if (!requireAuth(req, res, config, ['credentials:read'])) return;
+          if (!await requireAuth(req, res, config, ['credentials:read'])) return;
           if (validateContentType(req, res)) return;
 
           const body = await readJson(req, config);
@@ -201,7 +222,7 @@ export function createApp({ config, soroban, metrics, metricsAggregator, rateLim
 
         const snoozeMatch = url.pathname.match(/^\/credentials\/([^/]+)\/(?:expiry-reminder\/)?snooze$/);
         if (req.method === "POST" && snoozeMatch) {
-          if (!requireAuth(req, res, config, ['credentials:write'])) return;
+          if (!await requireAuth(req, res, config, ['credentials:write'])) return;
           if (validateContentType(req, res)) return;
 
           const credentialId = decodeURIComponent(snoozeMatch[1]);
@@ -237,7 +258,7 @@ export function createApp({ config, soroban, metrics, metricsAggregator, rateLim
 
         const dismissMatch = url.pathname.match(/^\/credentials\/([^/]+)\/(?:expiry-reminder\/)?dismiss$/);
         if (req.method === "POST" && dismissMatch) {
-          if (!requireAuth(req, res, config, ['credentials:write'])) return;
+          if (!await requireAuth(req, res, config, ['credentials:write'])) return;
 
           const credentialId = decodeURIComponent(dismissMatch[1]);
           const credentials = await readCredentials(config);
@@ -264,7 +285,7 @@ export function createApp({ config, soroban, metrics, metricsAggregator, rateLim
         const verifyMatch = url.pathname.match(/^\/credentials\/([^/]+)\/verify$/);
         if (req.method === "POST" && verifyMatch) {
           // Verify endpoint requires credentials:read scope
-          if (!requireAuth(req, res, config, ['credentials:read'])) return;
+          if (!await requireAuth(req, res, config, ['credentials:read'])) return;
           
           const credentialId = decodeURIComponent(verifyMatch[1]);
           const credentials = await readCredentials(config);
@@ -282,14 +303,8 @@ export function createApp({ config, soroban, metrics, metricsAggregator, rateLim
           return sendJson(res, 200, { verified: true, credential });
         }
 
-        if (
-          url.pathname.startsWith("/admin/") &&
-          !requireAdmin(req, res, config)
-        )
-          return;
-
         if (req.method === "POST" && url.pathname === "/credentials") {
-          if (!requireAuth(req, res, config, ['credentials:write'])) return;
+          if (!await requireAuth(req, res, config, ['credentials:write'])) return;
           if (validateContentType(req, res)) return;
           const body = await readJson(req, config);
           if (body.__payloadTooLarge)
@@ -314,13 +329,14 @@ export function createApp({ config, soroban, metrics, metricsAggregator, rateLim
 
         if (req.method === "GET" && url.pathname === "/admin/issuers") {
           // Reading issuers requires admin:read or wildcard scope
-          if (!requireAuth(req, res, config, ['admin:read'])) return;
+          if (!await requireAuth(req, res, config, ['admin:read'])) return;
           
           const issuers = await soroban.getIssuers();
           return sendJson(res, 200, { issuers });
         }
 
         if (req.method === "POST" && url.pathname === "/admin/issuers") {
+          if (!await requireAuth(req, res, config, ['admin:write'])) return;
           if (validateContentType(req, res)) return;
           const body = await readJson(req, config);
           if (body.__payloadTooLarge)
@@ -338,7 +354,7 @@ export function createApp({ config, soroban, metrics, metricsAggregator, rateLim
 
         if (req.method === "DELETE" && url.pathname === "/admin/issuers") {
           // Removing issuers requires admin:write scope
-          if (!requireAuth(req, res, config, ['admin:write'])) return;
+          if (!await requireAuth(req, res, config, ['admin:write'])) return;
           
           const body = await readJson(req, config);
           if (body.__payloadTooLarge)
@@ -356,7 +372,7 @@ export function createApp({ config, soroban, metrics, metricsAggregator, rateLim
 
         if (req.method === "GET" && url.pathname === "/admin/expiry-report") {
           // Reading expiry reports requires admin:read scope
-          if (!requireAuth(req, res, config, ['admin:read'])) return;
+          if (!await requireAuth(req, res, config, ['admin:read'])) return;
           
           const windowDays =
             Number.parseInt(url.searchParams.get("windowDays") ?? "", 10) ||
@@ -377,7 +393,7 @@ export function createApp({ config, soroban, metrics, metricsAggregator, rateLim
         }
 
         if (req.method === "GET" && (url.pathname === "/admin/expiry-thresholds" || url.pathname === "/expiry/thresholds")) {
-          if (!requireAuth(req, res, config, ['admin:read'])) return;
+          if (!await requireAuth(req, res, config, ['admin:read'])) return;
           return sendJson(res, 200, {
             thresholds: config.expiryReminderThresholds ?? [30, 7, 1],
             warningDays: config.expiryWarningDays ?? 7,
@@ -385,7 +401,7 @@ export function createApp({ config, soroban, metrics, metricsAggregator, rateLim
         }
 
         if (req.method === "POST" && (url.pathname === "/admin/expiry-thresholds" || url.pathname === "/expiry/thresholds")) {
-          if (!requireAuth(req, res, config, ['admin:write'])) return;
+          if (!await requireAuth(req, res, config, ['admin:write'])) return;
           if (validateContentType(req, res)) return;
           const body = await readJson(req, config);
           if (body.__payloadTooLarge) {
@@ -413,6 +429,80 @@ export function createApp({ config, soroban, metrics, metricsAggregator, rateLim
             success: true,
             thresholds: validThresholds,
           });
+        }
+
+        // #679: API Key Management Endpoints
+        if (req.method === "POST" && url.pathname === "/admin/api-keys") {
+          if (!await requireAuth(req, res, config, ['admin:write'])) return;
+          if (validateContentType(req, res)) return;
+          const body = await readJson(req, config);
+          if (body.__payloadTooLarge) {
+            return sendJson(res, 413, { code: "PAYLOAD_TOO_LARGE", message: "Request body exceeds the size limit." });
+          }
+
+          const issued = await apiKeyService.issueKey({
+            name: body.name ?? "default",
+            owner: body.owner ?? (req.headers["x-actor"] || config.adminActor),
+            scopes: body.scopes ?? ["credentials:read"],
+            tier: body.tier ?? "free",
+            expiresInDays: body.expiresInDays ? Number(body.expiresInDays) : null,
+          });
+
+          await appendAuditLog(config, {
+            action: "issue_api_key",
+            actor: req.headers["x-actor"] ?? config.adminActor,
+            keyId: issued.id,
+            owner: issued.owner,
+            scopes: issued.scopes,
+            tier: issued.tier,
+          });
+
+          return sendJson(res, 201, issued);
+        }
+
+        if (req.method === "GET" && url.pathname === "/admin/api-keys") {
+          if (!await requireAuth(req, res, config, ['admin:read'])) return;
+          const keys = await apiKeyService.listKeys();
+          return sendJson(res, 200, { keys });
+        }
+
+        const apiKeyIdMatch = url.pathname.match(/^\/admin\/api-keys\/([^/]+)$/);
+        if (req.method === "GET" && apiKeyIdMatch) {
+          if (!await requireAuth(req, res, config, ['admin:read'])) return;
+          const id = decodeURIComponent(apiKeyIdMatch[1]);
+          const keyMeta = await apiKeyService.getKey(id);
+          if (!keyMeta) return notFound(res);
+          return sendJson(res, 200, keyMeta);
+        }
+
+        if (req.method === "DELETE" && apiKeyIdMatch) {
+          if (!await requireAuth(req, res, config, ['admin:write'])) return;
+          const id = decodeURIComponent(apiKeyIdMatch[1]);
+          const revoked = await apiKeyService.revokeKey(id);
+          if (!revoked) return notFound(res);
+          await appendAuditLog(config, {
+            action: "revoke_api_key",
+            actor: req.headers["x-actor"] ?? config.adminActor,
+            keyId: id,
+          });
+          return sendJson(res, 200, { success: true, id, status: "revoked" });
+        }
+
+        const apiKeyRotateMatch = url.pathname.match(/^\/admin\/api-keys\/([^/]+)\/rotate$/);
+        if (req.method === "POST" && apiKeyRotateMatch) {
+          if (!await requireAuth(req, res, config, ['admin:write'])) return;
+          const id = decodeURIComponent(apiKeyRotateMatch[1]);
+          const body = await readJson(req, config);
+          const rotated = await apiKeyService.rotateKey(id, {
+            expiresInDays: body.expiresInDays ? Number(body.expiresInDays) : null,
+          });
+          if (!rotated) return notFound(res);
+          await appendAuditLog(config, {
+            action: "rotate_api_key",
+            actor: req.headers["x-actor"] ?? config.adminActor,
+            keyId: id,
+          });
+          return sendJson(res, 200, rotated);
         }
 
         return notFound(res);
