@@ -11,6 +11,7 @@ import { SorobanIdentityError } from "../errors";
 import type { AuthContext } from "./api-keys";
 
 export type RateClass = "read" | "write";
+export type UserTier = "free" | "pro" | "enterprise";
 
 export interface RateLimitConfig {
   /** Tokens replenished per `windowMs`. */
@@ -19,7 +20,23 @@ export interface RateLimitConfig {
   windowMs: number;
 }
 
+export const TIER_LIMITS: Record<UserTier, Record<RateClass, RateLimitConfig>> = {
+  free: {
+    read: { limit: 60, windowMs: 60_000 },
+    write: { limit: 20, windowMs: 60_000 },
+  },
+  pro: {
+    read: { limit: 300, windowMs: 60_000 },
+    write: { limit: 100, windowMs: 60_000 },
+  },
+  enterprise: {
+    read: { limit: 1200, windowMs: 60_000 },
+    write: { limit: 500, windowMs: 60_000 },
+  },
+};
+
 export interface RateLimitOptions {
+  tier?: UserTier;
   read?: Partial<RateLimitConfig>;
   write?: Partial<RateLimitConfig>;
   /** Per-key overrides — keyed by `apiKeyId` or `ip:<address>`. */
@@ -30,10 +47,7 @@ export interface RateLimitOptions {
   keyFn?: (req: RequestLike) => string;
 }
 
-export const RATE_LIMIT_DEFAULTS: Record<RateClass, RateLimitConfig> = {
-  read: { limit: 60, windowMs: 60_000 },
-  write: { limit: 20, windowMs: 60_000 },
-};
+export const RATE_LIMIT_DEFAULTS: Record<RateClass, RateLimitConfig> = TIER_LIMITS.free;
 
 interface Bucket {
   tokens: number;
@@ -136,6 +150,8 @@ type NextLike = (err?: unknown) => void;
 export interface RateLimitMiddlewareOptions extends RateLimitOptions {
   /** Classify the request as read or write. Default: GET/HEAD/OPTIONS → read. */
   classify?: (req: RequestLike, method: string) => RateClass;
+  /** Derive user tier from request. Default: req.auth?.apiKey?.tier ?? "free". */
+  deriveTier?: (req: RequestLike) => UserTier;
   rateLimiter?: TokenBucketRateLimiter;
 }
 
@@ -148,12 +164,16 @@ function defaultClassify(_req: RequestLike, method: string): RateClass {
   return m === "GET" || m === "HEAD" || m === "OPTIONS" ? "read" : "write";
 }
 
+function defaultDeriveTier(req: RequestLike): UserTier {
+  return (req.auth?.apiKey as (ApiKeyMetadata & { tier?: UserTier }) | undefined)?.tier ?? "free";
+}
+
 /**
  * Create an Express-compatible rate-limit middleware backed by
  * {@link TokenBucketRateLimiter}.
  *
- * Sets `X-RateLimit-Limit`, `X-RateLimit-Remaining`, and `X-RateLimit-Reset`
- * headers on every response. Returns `429 Too Many Requests` with a
+ * Sets `X-RateLimit-Limit`, `X-RateLimit-Remaining`, `X-RateLimit-Reset`, and
+ * `X-RateLimit-Tier` headers on every response. Returns `429 Too Many Requests` with a
  * `Retry-After` header when a bucket is exhausted.
  *
  * @param options Rate limit config, classifier, optional pre-built limiter.
@@ -168,23 +188,42 @@ export function createRateLimitMiddleware(options: RateLimitMiddlewareOptions = 
   const limiter = options.rateLimiter ?? new TokenBucketRateLimiter(options);
   const keyFn = options.keyFn ?? defaultKey;
   const classifyFn = options.classify ?? defaultClassify;
+  const deriveTierFn = options.deriveTier ?? defaultDeriveTier;
   return function rateLimit(
     req: RequestLike & { method?: string },
     res: ResLike,
     next: NextLike,
   ): void {
+    const tier = deriveTierFn(req);
     const key = keyFn(req);
     const rateClass = classifyFn(req, req.method ?? "GET");
     const result = limiter.consume(key, rateClass);
+    res.setHeader("X-RateLimit-Tier", tier);
     res.setHeader("X-RateLimit-Limit", result.limit);
     res.setHeader("X-RateLimit-Remaining", result.remaining);
     res.setHeader("X-RateLimit-Reset", result.resetAt);
     if (!result.allowed) {
       const retryAfterSeconds = Math.ceil(result.retryAfterMs / 1000);
       res.setHeader("Retry-After", retryAfterSeconds);
+      if (tier === "free") {
+        res.setHeader("X-Upgrade-Available", "Upgrade to Pro/Enterprise for higher limits: https://soroban-identity.org/pricing");
+      }
       const err = new SorobanIdentityError("rate limit exceeded", {
         code: "RATE_LIMITED",
-        details: { limit: result.limit, resetAt: result.resetAt, retryAfterMs: result.retryAfterMs },
+        details: {
+          tier,
+          limit: result.limit,
+          resetAt: result.resetAt,
+          retryAfterMs: result.retryAfterMs,
+          ...(tier === "free"
+            ? {
+                upgrade: {
+                  message: "Upgrade to Pro (300 req/min) or Enterprise (1200 req/min) for increased rate limits.",
+                  url: "https://soroban-identity.org/pricing",
+                },
+              }
+            : {}),
+        },
       });
       res.status(429).json({ error: err.toEnvelope() });
       return;

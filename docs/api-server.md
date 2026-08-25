@@ -76,10 +76,10 @@ Admin endpoints (recommended host wiring):
 - `GET /admin/api-keys` → `store.list`
 - `DELETE /admin/api-keys/:id` → `store.remove`
 
-## Rate limiting (#254)
+## Rate limiting (#254, #681)
 
 ```ts
-import { createRateLimitMiddleware } from "@soroban-identity/sdk";
+import { createRateLimitMiddleware, TIER_LIMITS } from "@soroban-identity/sdk";
 
 app.use(createApiKeyAuthMiddleware({ store }));
 app.use(createRateLimitMiddleware({
@@ -88,18 +88,28 @@ app.use(createRateLimitMiddleware({
 }));
 ```
 
-Token-bucket. Default classifier treats GET/HEAD/OPTIONS as reads. The
+Token-bucket rate limiter with multi-tier throttling based on user subscription levels:
+
+| Tier | Read Limit (req/min) | Write Limit (req/min) | Overall Max (req/min) |
+|---|---|---|---|
+| **Free** | 60 | 20 | 60 |
+| **Pro** | 300 | 100 | 300 |
+| **Enterprise** | 1200 | 500 | 1200 |
+
+Default classifier treats GET/HEAD/OPTIONS as reads. The
 bucket key is `req.auth?.apiKey.id` (when authenticated) or
 `ip:<address>` (when not). Per-key overrides supported via the
 `overrides` map.
 
 Every response carries:
+- `X-RateLimit-Tier` (`free`, `pro`, or `enterprise`)
 - `X-RateLimit-Limit`
 - `X-RateLimit-Remaining`
 - `X-RateLimit-Reset` (unix seconds)
 
 When exhausted: `429 Too Many Requests` + `Retry-After` (seconds) +
-envelope body `{ error: { code: "RATE_LIMITED", ... } }`.
+envelope body `{ error: { code: "RATE_LIMITED", tier: "free", upgrade: { ... } } }`.
+For free tier clients, responses also include upgrade information prompting migration to Pro or Enterprise.
 
 Limits are configurable via environment variables when host
 applications read them at startup; defaults match the issue's spec.

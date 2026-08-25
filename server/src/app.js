@@ -33,6 +33,8 @@ import {
 } from "./http-utils.js";
 import { requestContextStore } from "./request-context.js";
 import { logger } from "./logger.js";
+import { TieredRateLimiter } from "./rate-limiter.js";
+import { ApiKeyService } from "./api-keys.js";
 const SERVER_VERSION = "0.1.0";
 const MIN_SDK_VERSION = "0.1.0";
 const SERVER_FEATURES = [
@@ -71,6 +73,68 @@ export function createApp({ config, soroban, metrics, metricsAggregator, webhook
     if (setCorsHeaders(req, res, config)) {
       // Preflight OPTIONS request
       return res.writeHead(204).end();
+    }
+
+    // Extract tier and API key ID from API key or headers early if present
+    const authHeader = req.headers["authorization"] || req.headers["x-api-key"];
+    if (authHeader) {
+      const token = typeof authHeader === "string" ? authHeader.replace(/^Bearer\s+/i, "") : "";
+      try {
+        const keyRecord = await apiKeyService.validateKey(token);
+        if (keyRecord) {
+          req.apiKeyId = keyRecord.id;
+          req.userTier = keyRecord.tier || 'free';
+          req.auth = { apiKey: keyRecord };
+        } else {
+          const parts = token.split(":");
+          if (parts.length >= 2 && ["free", "pro", "enterprise"].includes(parts[1].toLowerCase())) {
+            req.userTier = parts[1].toLowerCase();
+          }
+        }
+      } catch {
+        // fallback
+      }
+    }
+    if (req.headers["x-user-tier"]) {
+      req.userTier = req.headers["x-user-tier"].toLowerCase();
+    }
+
+    // Rate limiting check (exempt /info, /health, /metrics)
+    const isExempt = ["/info", "/health", "/metrics"].includes(url.pathname);
+    if (!isExempt) {
+      const rateResult = rateLimiter.consume(req);
+      res.setHeader("X-RateLimit-Tier", rateResult.tier);
+      res.setHeader("X-RateLimit-Limit", String(rateResult.limit));
+      res.setHeader("X-RateLimit-Remaining", String(rateResult.remaining));
+      res.setHeader("X-RateLimit-Reset", String(rateResult.resetAt));
+
+      if (!rateResult.allowed) {
+        res.setHeader("Retry-After", String(rateResult.retryAfter));
+        if (rateResult.tier === "free") {
+          res.setHeader(
+            "X-Upgrade-Available",
+            "Upgrade to Pro or Enterprise for higher limits: https://soroban-identity.org/pricing"
+          );
+        }
+        return sendJson(res, 429, {
+          error: "rate_limit_exceeded",
+          code: "RATE_LIMIT_EXCEEDED",
+          message: rateResult.tier === "free"
+            ? `Free tier rate limit exceeded (${rateResult.limit} req/min). Upgrade to Pro (300 req/min) or Enterprise (1200 req/min) for higher limits.`
+            : `Rate limit exceeded for tier '${rateResult.tier}' (${rateResult.limit} req/min).`,
+          tier: rateResult.tier,
+          ...(rateResult.tier === "free"
+            ? {
+                upgrade: {
+                  message: "Upgrade to Pro or Enterprise for increased rate limits.",
+                  upgradeUrl: "https://soroban-identity.org/pricing",
+                  availableTiers: ["pro", "enterprise"],
+                },
+              }
+            : {}),
+          retryAfter: rateResult.retryAfter,
+        });
+      }
     }
 
     return requestContextStore.run({ requestId }, async () => {
@@ -211,7 +275,7 @@ export function createApp({ config, soroban, metrics, metricsAggregator, webhook
         const verifyMatch = pathname.match(/^\/credentials\/([^/]+)\/verify$/);
         if (req.method === "POST" && verifyMatch) {
           // Verify endpoint requires credentials:read scope
-          if (!requireAuth(req, res, config, ['credentials:read'])) return;
+          if (!await requireAuth(req, res, config, ['credentials:read'])) return;
           
           const credentialId = decodeURIComponent(verifyMatch[1]);
           const credentials = await readCredentials(config);
@@ -371,7 +435,7 @@ export function createApp({ config, soroban, metrics, metricsAggregator, webhook
 
         if (req.method === "GET" && pathname === "/admin/issuers") {
           // Reading issuers requires admin:read or wildcard scope
-          if (!requireAuth(req, res, config, ['admin:read'])) return;
+          if (!await requireAuth(req, res, config, ['admin:read'])) return;
           
           const issuers = await soroban.getIssuers();
           return sendJson(res, 200, { issuers });
@@ -395,7 +459,7 @@ export function createApp({ config, soroban, metrics, metricsAggregator, webhook
 
         if (req.method === "DELETE" && pathname === "/admin/issuers") {
           // Removing issuers requires admin:write scope
-          if (!requireAuth(req, res, config, ['admin:write'])) return;
+          if (!await requireAuth(req, res, config, ['admin:write'])) return;
           
           const body = await readJson(req, config);
           if (body.__payloadTooLarge)
@@ -413,7 +477,7 @@ export function createApp({ config, soroban, metrics, metricsAggregator, webhook
 
         if (req.method === "GET" && pathname === "/admin/expiry-report") {
           // Reading expiry reports requires admin:read scope
-          if (!requireAuth(req, res, config, ['admin:read'])) return;
+          if (!await requireAuth(req, res, config, ['admin:read'])) return;
           
           const windowDays =
             Number.parseInt(url.searchParams.get("windowDays") ?? "", 10) ||
@@ -431,6 +495,119 @@ export function createApp({ config, soroban, metrics, metricsAggregator, webhook
               pageSize: url.searchParams.get("pageSize"),
             }),
           );
+        }
+
+        if (req.method === "GET" && (url.pathname === "/admin/expiry-thresholds" || url.pathname === "/expiry/thresholds")) {
+          if (!await requireAuth(req, res, config, ['admin:read'])) return;
+          return sendJson(res, 200, {
+            thresholds: config.expiryReminderThresholds ?? [30, 7, 1],
+            warningDays: config.expiryWarningDays ?? 7,
+          });
+        }
+
+        if (req.method === "POST" && (url.pathname === "/admin/expiry-thresholds" || url.pathname === "/expiry/thresholds")) {
+          if (!await requireAuth(req, res, config, ['admin:write'])) return;
+          if (validateContentType(req, res)) return;
+          const body = await readJson(req, config);
+          if (body.__payloadTooLarge) {
+            return sendJson(res, 413, { code: "PAYLOAD_TOO_LARGE", message: "Request body exceeds the size limit." });
+          }
+          if (!Array.isArray(body.thresholds)) {
+            return sendJson(res, 400, { code: "INVALID_REQUEST", message: "thresholds must be an array of positive integers (days)." });
+          }
+          const validThresholds = body.thresholds
+            .map((n) => Number.parseInt(n, 10))
+            .filter((n) => Number.isFinite(n) && n > 0)
+            .sort((a, b) => b - a);
+
+          if (validThresholds.length === 0) {
+            return sendJson(res, 400, { code: "INVALID_REQUEST", message: "thresholds must contain at least one positive integer." });
+          }
+
+          config.expiryReminderThresholds = validThresholds;
+          await appendAuditLog(config, {
+            action: "update_expiry_thresholds",
+            thresholds: validThresholds,
+          });
+
+          return sendJson(res, 200, {
+            success: true,
+            thresholds: validThresholds,
+          });
+        }
+
+        // #679: API Key Management Endpoints
+        if (req.method === "POST" && url.pathname === "/admin/api-keys") {
+          if (!await requireAuth(req, res, config, ['admin:write'])) return;
+          if (validateContentType(req, res)) return;
+          const body = await readJson(req, config);
+          if (body.__payloadTooLarge) {
+            return sendJson(res, 413, { code: "PAYLOAD_TOO_LARGE", message: "Request body exceeds the size limit." });
+          }
+
+          const issued = await apiKeyService.issueKey({
+            name: body.name ?? "default",
+            owner: body.owner ?? (req.headers["x-actor"] || config.adminActor),
+            scopes: body.scopes ?? ["credentials:read"],
+            tier: body.tier ?? "free",
+            expiresInDays: body.expiresInDays ? Number(body.expiresInDays) : null,
+          });
+
+          await appendAuditLog(config, {
+            action: "issue_api_key",
+            actor: req.headers["x-actor"] ?? config.adminActor,
+            keyId: issued.id,
+            owner: issued.owner,
+            scopes: issued.scopes,
+            tier: issued.tier,
+          });
+
+          return sendJson(res, 201, issued);
+        }
+
+        if (req.method === "GET" && url.pathname === "/admin/api-keys") {
+          if (!await requireAuth(req, res, config, ['admin:read'])) return;
+          const keys = await apiKeyService.listKeys();
+          return sendJson(res, 200, { keys });
+        }
+
+        const apiKeyIdMatch = url.pathname.match(/^\/admin\/api-keys\/([^/]+)$/);
+        if (req.method === "GET" && apiKeyIdMatch) {
+          if (!await requireAuth(req, res, config, ['admin:read'])) return;
+          const id = decodeURIComponent(apiKeyIdMatch[1]);
+          const keyMeta = await apiKeyService.getKey(id);
+          if (!keyMeta) return notFound(res);
+          return sendJson(res, 200, keyMeta);
+        }
+
+        if (req.method === "DELETE" && apiKeyIdMatch) {
+          if (!await requireAuth(req, res, config, ['admin:write'])) return;
+          const id = decodeURIComponent(apiKeyIdMatch[1]);
+          const revoked = await apiKeyService.revokeKey(id);
+          if (!revoked) return notFound(res);
+          await appendAuditLog(config, {
+            action: "revoke_api_key",
+            actor: req.headers["x-actor"] ?? config.adminActor,
+            keyId: id,
+          });
+          return sendJson(res, 200, { success: true, id, status: "revoked" });
+        }
+
+        const apiKeyRotateMatch = url.pathname.match(/^\/admin\/api-keys\/([^/]+)\/rotate$/);
+        if (req.method === "POST" && apiKeyRotateMatch) {
+          if (!await requireAuth(req, res, config, ['admin:write'])) return;
+          const id = decodeURIComponent(apiKeyRotateMatch[1]);
+          const body = await readJson(req, config);
+          const rotated = await apiKeyService.rotateKey(id, {
+            expiresInDays: body.expiresInDays ? Number(body.expiresInDays) : null,
+          });
+          if (!rotated) return notFound(res);
+          await appendAuditLog(config, {
+            action: "rotate_api_key",
+            actor: req.headers["x-actor"] ?? config.adminActor,
+            keyId: id,
+          });
+          return sendJson(res, 200, rotated);
         }
 
         return notFound(res);
