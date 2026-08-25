@@ -67,9 +67,6 @@ export type {
   VerifyFailReason,
   SorobanIdentityConfig,
   SorobanIdentityLogger,
-  ReputationRecord,
-  ScoreHistoryEntry,
-  AccountInfo,
   CallOptions,
   IdentityStorageStats,
   CredentialStorageStats,
@@ -105,10 +102,6 @@ export type {
   PresentationVerifyFailReason,
 } from './presentation';
 
-// ── Events ────────────────────────────────────────────────────────────────────
-export { SorobanEventListener, getEvents, subscribeToEvents } from './events';
-export type { SubscribeOptions, EventFilter, ContractEvent, GetEventsOptions } from './events';
-
 // ── Health ────────────────────────────────────────────────────────────────────
 export { health, healthCheck } from './health';
 export type { HealthResult, HealthCheckResult } from './health';
@@ -119,25 +112,6 @@ export type { ServerInfo } from './server-info';
 
 // ── Transaction helpers ───────────────────────────────────────────────────────
 export { SorobanTransactionBuilder } from './transaction-builder';
-export { executeTransaction } from './transaction';
-export type { TxOptions } from './transaction';
-
-// ── Errors ────────────────────────────────────────────────────────────────────
-export {
-  ContractError,
-  SorobanIdentityError,
-  RateLimitError,
-  classifyError,
-  wrapError,
-  parseContractError,
-} from './errors';
-export type { SorobanErrorCode, SorobanIdentityErrorInit } from './errors';
-export {
-  SorobanErrorCodes,
-  IDENTITY_REGISTRY_ERRORS,
-  CREDENTIAL_MANAGER_ERRORS,
-  REPUTATION_ERRORS,
-} from './error-codes';
 
 // ── Utils ─────────────────────────────────────────────────────────────────────
 export {
@@ -189,30 +163,6 @@ export {
   buildListHistoryArgs,
   buildGetRevocationsArgs,
 } from './contract-args';
-
-// ── Types ─────────────────────────────────────────────────────────────────────
-export type {
-  DidDocument,
-  ServiceEndpoint,
-  Credential,
-  RevokedCredential,
-  CredentialType,
-  CredentialListOptions,
-  VerifyResult,
-  VerifyFailReason,
-  SorobanIdentityConfig,
-  SorobanIdentityLogger,
-  CallOptions,
-  WriteResult,
-  SorobanResponse,
-  IdentityStorageStats,
-  CredentialStorageStats,
-  ReputationStorageStats,
-  Page,
-  PaginationOptions,
-  FeeEstimate,
-} from './types';
-export { validateConfig, assertCredentialType, UnknownCredentialTypeError, SimulationError } from './types';
 
 // ── OpenAPI / v1 ──────────────────────────────────────────────────────────────
 export * as v1 from './v1';

@@ -342,6 +342,30 @@ export function createCredential(credentials, credential) {
   return [...credentials, credential];
 }
 
+/**
+ * Atomically mark a credential as revoked under a per-file mutex.
+ *
+ * @param {object} config
+ * @param {string} id
+ * @returns {Promise<object|null>} The revoked credential or null if not found
+ */
+export async function revokeAndPersistCredential(config, id) {
+  const storePath = path.resolve(config.credentialStorePath);
+  const release = await _acquireFileLock(storePath);
+  try {
+    const current = await readCredentials(config);
+    const index = current.findIndex((c) => c.id === id);
+    if (index === -1) return null;
+    const revokedAt = new Date().toISOString();
+    const updated = current.map((c) => (c.id === id ? { ...c, revoked: true, revokedAt } : { ...c }));
+    await writeCredentials(config, updated);
+    return updated[index];
+  } finally {
+    release();
+  }
+}
+
+
 // ── Expiry scanner watermark persistence ──────────────────────────────────────
 /**
  * Get the path where the expiry watermark is stored.

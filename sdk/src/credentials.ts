@@ -78,25 +78,10 @@ export function toCredentialExpiry(dateOrMs: Date | number): number {
   return Math.floor(ms / 1000);
 }
 
-export interface CredentialInput {
-  issuerKeypair: Keypair;
-  subjectAddress: string;
-  credentialType: CredentialType;
-  claims: Record<string, string>;
-  claimsHashHex: string;
-  expiresAt?: number;
-  options?: CallOptions & { nonce?: string; schemaId?: string };
-  signatureHex?: string;
-}
-
-export interface BatchOptions {
-  concurrency?: number;
-}
-
-export interface BatchResult {
-  succeeded: Array<SorobanResponse<{ credentialId: string } & WriteResult>>;
-  failed: Array<{ input: CredentialInput; error: SorobanIdentityError }>;
-}
+/** Contract error codes returned by credential-manager — see {@link CREDENTIAL_MANAGER_ERRORS}. */
+const CREDENTIAL_NOT_FOUND_CODE = 3;
+const CREDENTIAL_REVOKED_CODE = 4;
+const CREDENTIAL_EXPIRED_CODE = 9;
 
 /**
  * Client for the credential-manager contract.
@@ -526,7 +511,7 @@ export class CredentialClient extends BaseClient {
       );
     }
 
-    const ajv = new AjvCtor({ allErrors: true });
+    const ajv = new Ajv({ allErrors: true });
     const validate = ajv.compile(schema);
     const valid = validate(claims);
     if (!valid) {
@@ -574,6 +559,13 @@ export class CredentialClient extends BaseClient {
 
     if (isSimulationError) {
       const error: string = (result as { error: string }).error ?? "";
+      const contractErr = ContractError.extract(error, CREDENTIAL_MANAGER_ERRORS);
+      if (contractErr) {
+        if (contractErr.code === CREDENTIAL_NOT_FOUND_CODE) return { valid: false, reason: 'not_found' };
+        if (contractErr.code === CREDENTIAL_REVOKED_CODE) return { valid: false, reason: 'revoked' };
+        if (contractErr.code === CREDENTIAL_EXPIRED_CODE) return { valid: false, reason: 'expired' };
+        return { valid: false, reason: 'unknown' };
+      }
       const lowerError = error.toLowerCase();
       if (lowerError.includes('not found') || lowerError.includes('credentialnotfound')) {
         return { valid: false, reason: 'not_found' };
@@ -600,6 +592,32 @@ export class CredentialClient extends BaseClient {
     } catch {
       return { valid: false, reason: 'unknown' };
     }
+  }
+
+  /**
+   * Verify multiple credentials in a batch with partial success handling.
+   * Up to 50 credentials can be verified in a single call.
+   */
+  async verifyCredentialBatch(
+    callerAddress: string,
+    credentialIds: string[],
+    options?: CallOptions & { concurrency?: number }
+  ): Promise<Array<{ id: string } & VerifyResult>> {
+    if (!Array.isArray(credentialIds)) {
+      throw new SorobanIdentityError("credentialIds must be an array", "INVALID_INPUT");
+    }
+    if (credentialIds.length > 50) {
+      throw new SorobanIdentityError("credentialIds cannot exceed 50 items", "INVALID_INPUT");
+    }
+    const concurrency = options?.concurrency ?? 5;
+    return runConcurrent(credentialIds, concurrency, async (id) => {
+      try {
+        const result = await this.verifyCredential(callerAddress, id, options);
+        return { id, ...result };
+      } catch {
+        return { id, valid: false, reason: "unknown" };
+      }
+    });
   }
 
   /**

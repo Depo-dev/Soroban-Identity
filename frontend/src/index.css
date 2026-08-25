@@ -32,6 +32,8 @@
   --badge-gray-text:          #475569;
   --badge-purple-bg:          #ede9fe;
   --badge-purple-text:        #5b21b6;
+  --badge-yellow-bg:          #fef9c3;
+  --badge-yellow-text:        #854d0e;
   --warning-bg:               #fff7ed;
   --warning-text:             #9a3412;
   --warning-border:           #fdba74;
@@ -86,6 +88,8 @@
     --badge-gray-text:          #cbd5e1;
     --badge-purple-bg:          #2e1065;
     --badge-purple-text:        #c4b5fd;
+    --badge-yellow-bg:          #422006;
+    --badge-yellow-text:        #fde047;
     --warning-bg:               #431407;
     --warning-text:             #fed7aa;
     --warning-border:           #c2410c;
@@ -193,6 +197,8 @@ html.light {
   --badge-gray-text:          #475569;
   --badge-purple-bg:          #ede9fe;
   --badge-purple-text:        #5b21b6;
+  --badge-yellow-bg:          #fef9c3;
+  --badge-yellow-text:        #854d0e;
   --warning-bg:               #fff7ed;
   --warning-text:             #9a3412;
   --warning-border:           #fdba74;
@@ -292,7 +298,7 @@ button:disabled { background: var(--btn-disabled-bg); color: var(--btn-disabled-
 .badge-red    { background: var(--badge-red-bg);    color: var(--badge-red-text); }
 .badge-gray   { background: var(--badge-gray-bg);   color: var(--badge-gray-text); }
 .badge-purple { background: var(--badge-purple-bg); color: var(--badge-purple-text); }
-.badge-gray   { background: var(--border-input);    color: var(--text-muted); }
+.badge-yellow { background: var(--badge-yellow-bg); color: var(--badge-yellow-text); }
 
 .result {
   margin-top: 1rem;
@@ -487,6 +493,20 @@ button:disabled { background: var(--btn-disabled-bg); color: var(--btn-disabled-
   input, textarea {
     padding: 0.5rem 0.6rem;
     font-size: 16px;
+  }
+}
+
+@media (max-width: 375px) {
+  .card h2 { font-size: 0.95rem; }
+
+  .badge {
+    font-size: 0.65rem;
+    padding: 0.1rem 0.4rem;
+  }
+
+  button {
+    padding: 0.4rem 0.6rem;
+    font-size: 0.75rem;
   }
 }
 

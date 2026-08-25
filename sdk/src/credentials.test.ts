@@ -36,6 +36,7 @@ vi.mock("@stellar/stellar-sdk", () => {
       build: vi.fn().mockReturnValue({ sign: vi.fn() }),
     })),
     BASE_FEE: "100",
+    Account: vi.fn().mockImplementation((id: string) => ({ id, sequence: "0" })),
     Keypair: {
       fromSecret: vi.fn().mockReturnValue({
         publicKey: () => "GABC",

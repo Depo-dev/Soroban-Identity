@@ -57,6 +57,22 @@ function parseCorsOrigins(value, nodeEnv) {
     .filter(Boolean);
 }
 
+function parseThresholds(value, fallback = [30, 7, 1]) {
+  if (!value) return fallback;
+  try {
+    if (typeof value === "string") {
+      const parsed = value
+        .split(",")
+        .map((s) => Number.parseInt(s.trim(), 10))
+        .filter((n) => Number.isFinite(n) && n > 0);
+      return parsed.length > 0 ? parsed.sort((a, b) => b - a) : fallback;
+    }
+  } catch {
+    return fallback;
+  }
+  return fallback;
+}
+
 export function loadConfig(env = process.env) {
   const nodeEnv = env.NODE_ENV ?? "development";
   return {
@@ -75,6 +91,10 @@ export function loadConfig(env = process.env) {
       ? path.resolve(env.CREDENTIAL_STORE_PATH)
       : path.join(DEFAULT_DATA_DIR, "credentials.json"),
     expiryWarningDays: parseInteger(env.EXPIRY_WARNING_DAYS, 7),
+    expiryReminderThresholds: parseThresholds(
+      env.EXPIRY_REMINDER_THRESHOLDS,
+      [30, 7, 1],
+    ),
     expiryJobIntervalMs: parseInteger(
       env.EXPIRY_JOB_INTERVAL_MS,
       60 * 60 * 1000,
