@@ -5,6 +5,7 @@ import { ensureDataDir } from './storage.js';
 import { ExpiryNotificationJob } from './expiry.js';
 import { MetricsAggregator, MetricsService } from './metrics.js';
 import { SorobanClient } from './soroban.js';
+import { WebhookDeliveryService } from './webhooks.js';
 import { logger } from './logger.js';
 
 const validationResult = validateConfig();
@@ -30,12 +31,14 @@ const config = loadConfig();
 await ensureDataDir(config);
 const metrics = new MetricsService();
 const soroban = new SorobanClient(config, metrics);
+const webhookService = new WebhookDeliveryService(config);
 const metricsAggregator = new MetricsAggregator(soroban, metrics, { startLedger: Number.parseInt(process.env.METRICS_START_LEDGER ?? '0', 10) });
 const expiryJob = new ExpiryNotificationJob(config, soroban);
 
 if (process.env.DISABLE_EXPIRY_JOB !== 'true') expiryJob.start();
 
-const server = http.createServer(createApp({ config, soroban, metrics, metricsAggregator }));
+const server = http.createServer(createApp({ config, soroban, metrics, metricsAggregator, webhookService }));
+
 
 const connections = new Set();
 server.on('connection', (socket) => {
@@ -73,9 +76,10 @@ function shutdown(signal) {
   server.close(async () => {
     clearTimeout(timer);
     try {
+      webhookService.drain();
       await soroban.drain();
     } catch (error) {
-      logger.error({ error: error.message, stack: error.stack }, 'Error during soroban drain');
+      logger.error({ error: error.message, stack: error.stack }, 'Error during drain');
     }
     logger.info('Shutdown complete');
     process.exit(0);

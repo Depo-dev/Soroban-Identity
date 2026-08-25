@@ -1,7 +1,15 @@
 import { URL } from "node:url";
 import crypto from "node:crypto";
-import { appendAuditLog, readCredentials, writeCredentials, createAndPersistCredential, DuplicateCredentialError } from "./storage.js";
+import { appendAuditLog, readCredentials, writeCredentials, createAndPersistCredential, revokeAndPersistCredential, DuplicateCredentialError } from "./storage.js";
 import { findExpiringCredentials, paginate, paginateCursor } from "./expiry.js";
+import {
+  createWebhookRecord,
+  deleteWebhookRecord,
+  getWebhookRecord,
+  readWebhookLogs,
+  readWebhooks,
+  WebhookDeliveryService,
+} from "./webhooks.js";
 import {
   notFound,
   readJson,
@@ -18,7 +26,7 @@ const SERVER_VERSION = "0.1.0";
 const MIN_SDK_VERSION = "0.1.0";
 const SERVER_FEATURES = ["webhook_delivery", "batch_issuance", "event_polling"];
 
-export function createApp({ config, soroban, metrics, metricsAggregator }) {
+export function createApp({ config, soroban, metrics, metricsAggregator, webhookService = new WebhookDeliveryService(config) }) {
   return function app(req, res) {
     const url = new URL(
       req.url,
@@ -132,6 +140,7 @@ export function createApp({ config, soroban, metrics, metricsAggregator }) {
           try {
             const updated = await createAndPersistCredential(config, body);
             await appendAuditLog(config, { action: "issue_credential", credentialId: body.id });
+            webhookService.trigger("credential.issued", body).catch(() => {});
             return sendJson(res, 201, body);
           } catch (err) {
             if (err instanceof DuplicateCredentialError) {
@@ -143,6 +152,99 @@ export function createApp({ config, soroban, metrics, metricsAggregator }) {
             }
             throw err;
           }
+        }
+
+        // Credential revocation: DELETE /credentials/:id/revoke or POST /credentials/:id/revoke or DELETE /credentials/:id
+        const revokeMatch = url.pathname.match(/^\/credentials\/([^/]+)(\/revoke)?$/);
+        if ((req.method === "DELETE" || (req.method === "POST" && url.pathname.endsWith("/revoke"))) && revokeMatch) {
+          if (!requireAuth(req, res, config, ['credentials:write'])) return;
+          const credentialId = decodeURIComponent(revokeMatch[1]);
+          const revoked = await revokeAndPersistCredential(config, credentialId);
+          if (!revoked) return notFound(res);
+          await appendAuditLog(config, { action: "revoke_credential", credentialId });
+          webhookService.trigger("credential.revoked", { id: credentialId, revokedAt: revoked.revokedAt }).catch(() => {});
+          return sendJson(res, 200, { revoked: true, credential: revoked });
+        }
+
+        // ── Webhook Endpoints ──────────────────────────────────────────
+        if (req.method === "GET" && url.pathname === "/webhooks") {
+          if (!requireAuth(req, res, config, ['admin:read'])) return;
+          const webhooks = await readWebhooks(config);
+          return sendJson(res, 200, { webhooks });
+        }
+
+        if (req.method === "POST" && url.pathname === "/webhooks") {
+          if (!requireAuth(req, res, config, ['admin:write'])) return;
+          if (validateContentType(req, res)) return;
+          const body = await readJson(req, config);
+          if (body.__payloadTooLarge)
+            return sendJson(res, 413, { code: "PAYLOAD_TOO_LARGE", message: "Request body exceeds the size limit." });
+          if (!body.url)
+            return sendJson(res, 400, { code: "INVALID_REQUEST", message: "Webhook url is required." });
+          try {
+            new URL(body.url);
+          } catch {
+            return sendJson(res, 400, { code: "INVALID_REQUEST", message: "Invalid webhook url." });
+          }
+          const webhook = await createWebhookRecord(config, body);
+          return sendJson(res, 201, webhook);
+        }
+
+        if (req.method === "GET" && url.pathname === "/webhooks/logs") {
+          if (!requireAuth(req, res, config, ['admin:read'])) return;
+          const limit = Number.parseInt(url.searchParams.get("limit") ?? "50", 10) || 50;
+          const webhookId = url.searchParams.get("webhookId");
+          const logs = await readWebhookLogs(config, { webhookId, limit });
+          return sendJson(res, 200, { logs });
+        }
+
+        const webhookTestMatch = url.pathname.match(/^\/webhooks\/([^/]+)\/test$/);
+        if (req.method === "POST" && (webhookTestMatch || url.pathname === "/webhooks/test")) {
+          if (!requireAuth(req, res, config, ['admin:write'])) return;
+          let webhook;
+          if (webhookTestMatch) {
+            const id = decodeURIComponent(webhookTestMatch[1]);
+            webhook = await getWebhookRecord(config, id);
+            if (!webhook) return notFound(res);
+          } else {
+            if (validateContentType(req, res)) return;
+            const body = await readJson(req, config);
+            if (!body.url) return sendJson(res, 400, { code: "INVALID_REQUEST", message: "Webhook url is required for test." });
+            webhook = {
+              id: "whk_test",
+              url: body.url,
+              secret: body.secret || "test-secret",
+              authToken: body.authToken,
+            };
+          }
+          const testResult = await webhookService.deliverTest(webhook);
+          return sendJson(res, 200, testResult);
+        }
+
+        const webhookLogsMatch = url.pathname.match(/^\/webhooks\/([^/]+)\/logs$/);
+        if (req.method === "GET" && webhookLogsMatch) {
+          if (!requireAuth(req, res, config, ['admin:read'])) return;
+          const webhookId = decodeURIComponent(webhookLogsMatch[1]);
+          const limit = Number.parseInt(url.searchParams.get("limit") ?? "50", 10) || 50;
+          const logs = await readWebhookLogs(config, { webhookId, limit });
+          return sendJson(res, 200, { logs });
+        }
+
+        const webhookIdMatch = url.pathname.match(/^\/webhooks\/([^/]+)$/);
+        if (req.method === "GET" && webhookIdMatch && url.pathname !== "/webhooks/logs") {
+          if (!requireAuth(req, res, config, ['admin:read'])) return;
+          const id = decodeURIComponent(webhookIdMatch[1]);
+          const webhook = await getWebhookRecord(config, id);
+          if (!webhook) return notFound(res);
+          return sendJson(res, 200, webhook);
+        }
+
+        if (req.method === "DELETE" && webhookIdMatch) {
+          if (!requireAuth(req, res, config, ['admin:write'])) return;
+          const id = decodeURIComponent(webhookIdMatch[1]);
+          const deleted = await deleteWebhookRecord(config, id);
+          if (!deleted) return notFound(res);
+          return sendJson(res, 200, { success: true, id });
         }
 
         if (req.method === "GET" && url.pathname === "/admin/issuers") {
