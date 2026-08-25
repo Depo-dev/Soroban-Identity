@@ -199,6 +199,68 @@ export function createApp({ config, soroban, metrics, metricsAggregator, rateLim
           });
         }
 
+        const snoozeMatch = url.pathname.match(/^\/credentials\/([^/]+)\/(?:expiry-reminder\/)?snooze$/);
+        if (req.method === "POST" && snoozeMatch) {
+          if (!requireAuth(req, res, config, ['credentials:write'])) return;
+          if (validateContentType(req, res)) return;
+
+          const credentialId = decodeURIComponent(snoozeMatch[1]);
+          const body = await readJson(req, config);
+          if (body.__payloadTooLarge) {
+            return sendJson(res, 413, { code: "PAYLOAD_TOO_LARGE", message: "Request body exceeds the size limit." });
+          }
+
+          const credentials = await readCredentials(config);
+          const index = credentials.findIndex((c) => c.id === credentialId);
+          if (index === -1) return notFound(res);
+
+          const days = Number(body.days ?? body.snoozeDays ?? 7);
+          const untilMs = body.until ? new Date(body.until).getTime() : Date.now() + days * 24 * 60 * 60 * 1000;
+
+          credentials[index] = {
+            ...credentials[index],
+            snoozed_until: untilMs,
+          };
+          await writeCredentials(config, credentials);
+          await appendAuditLog(config, {
+            action: "snooze_expiry_reminder",
+            credentialId,
+            snoozedUntil: new Date(untilMs).toISOString(),
+          });
+
+          return sendJson(res, 200, {
+            success: true,
+            credentialId,
+            snoozedUntil: new Date(untilMs).toISOString(),
+          });
+        }
+
+        const dismissMatch = url.pathname.match(/^\/credentials\/([^/]+)\/(?:expiry-reminder\/)?dismiss$/);
+        if (req.method === "POST" && dismissMatch) {
+          if (!requireAuth(req, res, config, ['credentials:write'])) return;
+
+          const credentialId = decodeURIComponent(dismissMatch[1]);
+          const credentials = await readCredentials(config);
+          const index = credentials.findIndex((c) => c.id === credentialId);
+          if (index === -1) return notFound(res);
+
+          credentials[index] = {
+            ...credentials[index],
+            expiry_dismissed: true,
+          };
+          await writeCredentials(config, credentials);
+          await appendAuditLog(config, {
+            action: "dismiss_expiry_reminder",
+            credentialId,
+          });
+
+          return sendJson(res, 200, {
+            success: true,
+            credentialId,
+            dismissed: true,
+          });
+        }
+
         const verifyMatch = url.pathname.match(/^\/credentials\/([^/]+)\/verify$/);
         if (req.method === "POST" && verifyMatch) {
           // Verify endpoint requires credentials:read scope
@@ -312,6 +374,45 @@ export function createApp({ config, soroban, metrics, metricsAggregator, rateLim
               pageSize: url.searchParams.get("pageSize"),
             }),
           );
+        }
+
+        if (req.method === "GET" && (url.pathname === "/admin/expiry-thresholds" || url.pathname === "/expiry/thresholds")) {
+          if (!requireAuth(req, res, config, ['admin:read'])) return;
+          return sendJson(res, 200, {
+            thresholds: config.expiryReminderThresholds ?? [30, 7, 1],
+            warningDays: config.expiryWarningDays ?? 7,
+          });
+        }
+
+        if (req.method === "POST" && (url.pathname === "/admin/expiry-thresholds" || url.pathname === "/expiry/thresholds")) {
+          if (!requireAuth(req, res, config, ['admin:write'])) return;
+          if (validateContentType(req, res)) return;
+          const body = await readJson(req, config);
+          if (body.__payloadTooLarge) {
+            return sendJson(res, 413, { code: "PAYLOAD_TOO_LARGE", message: "Request body exceeds the size limit." });
+          }
+          if (!Array.isArray(body.thresholds)) {
+            return sendJson(res, 400, { code: "INVALID_REQUEST", message: "thresholds must be an array of positive integers (days)." });
+          }
+          const validThresholds = body.thresholds
+            .map((n) => Number.parseInt(n, 10))
+            .filter((n) => Number.isFinite(n) && n > 0)
+            .sort((a, b) => b - a);
+
+          if (validThresholds.length === 0) {
+            return sendJson(res, 400, { code: "INVALID_REQUEST", message: "thresholds must contain at least one positive integer." });
+          }
+
+          config.expiryReminderThresholds = validThresholds;
+          await appendAuditLog(config, {
+            action: "update_expiry_thresholds",
+            thresholds: validThresholds,
+          });
+
+          return sendJson(res, 200, {
+            success: true,
+            thresholds: validThresholds,
+          });
         }
 
         return notFound(res);

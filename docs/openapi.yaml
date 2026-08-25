@@ -467,6 +467,114 @@ paths:
         '415':
           description: Unsupported media type.
 
+  /credentials/{id}/expiry-reminder/snooze:
+    parameters:
+      - { in: path, name: id, required: true, schema: { type: string } }
+    post:
+      tags: [credentials]
+      summary: Snooze expiry reminder notifications for a credential.
+      description: |
+        Snoozes automated expiry reminder webhook dispatches for the specified number of days or until a target date.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                days:
+                  type: integer
+                  default: 7
+                  description: Number of days to snooze notifications.
+                until:
+                  type: string
+                  format: date-time
+                  description: ISO 8601 timestamp until which reminders should be snoozed.
+      responses:
+        '200':
+          description: Expiry reminder snoozed.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [success, credentialId, snoozedUntil]
+                properties:
+                  success: { type: boolean }
+                  credentialId: { type: string }
+                  snoozedUntil: { type: string, format: date-time }
+        '404':
+          description: Credential not found.
+
+  /credentials/{id}/expiry-reminder/dismiss:
+    parameters:
+      - { in: path, name: id, required: true, schema: { type: string } }
+    post:
+      tags: [credentials]
+      summary: Dismiss expiry reminder notifications for a credential.
+      description: |
+        Permanently dismisses future expiry reminder webhook dispatches for this credential.
+      responses:
+        '200':
+          description: Expiry reminder dismissed.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [success, credentialId, dismissed]
+                properties:
+                  success: { type: boolean }
+                  credentialId: { type: string }
+                  dismissed: { type: boolean }
+        '404':
+          description: Credential not found.
+
+  /admin/expiry-thresholds:
+    get:
+      tags: [admin]
+      summary: Get current expiry reminder notification thresholds.
+      responses:
+        '200':
+          description: Active reminder thresholds.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [thresholds, warningDays]
+                properties:
+                  thresholds:
+                    type: array
+                    items: { type: integer }
+                    example: [30, 7, 1]
+                  warningDays: { type: integer }
+    post:
+      tags: [admin]
+      summary: Update expiry reminder notification thresholds.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [thresholds]
+              properties:
+                thresholds:
+                  type: array
+                  items: { type: integer }
+                  example: [30, 14, 7, 1]
+      responses:
+        '200':
+          description: Thresholds updated.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [success, thresholds]
+                properties:
+                  success: { type: boolean }
+                  thresholds:
+                    type: array
+                    items: { type: integer }
+
   /credentials/by-subject/{subject}:
     parameters:
       - { in: path, name: subject, required: true, schema: { type: string } }
