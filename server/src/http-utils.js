@@ -133,10 +133,25 @@ export function requireAuth(req, res, config, requiredScopes = []) {
     return false;
   }
   
-  // Parse API key record if it contains scope information
-  // Format: apiKey:scope1,scope2,scope3 or just apiKey for full access
-  const [keyPart, scopesPart] = token.split(':');
-  const keyScopes = scopesPart ? scopesPart.split(',') : [];
+  // Parse API key record if it contains scope and/or tier information
+  // Format: apiKey:scope1,scope2 or apiKey:tier:scope1,scope2 or just apiKey
+  const parts = token.split(':');
+  const keyPart = parts[0];
+  let keyScopes = [];
+  let userTier = req.headers['x-user-tier']?.toLowerCase() || 'free';
+
+  if (parts.length === 2) {
+    if (['free', 'pro', 'enterprise'].includes(parts[1].toLowerCase())) {
+      userTier = parts[1].toLowerCase();
+    } else {
+      keyScopes = parts[1].split(',');
+    }
+  } else if (parts.length >= 3) {
+    userTier = parts[1].toLowerCase();
+    keyScopes = parts[2].split(',');
+  }
+
+  req.userTier = userTier;
   
   // Constant-time API key comparison to prevent timing side-channel attacks.
   // crypto.timingSafeEqual requires equal-length buffers — if lengths differ
@@ -152,7 +167,7 @@ export function requireAuth(req, res, config, requiredScopes = []) {
   }
   
   // If this is the admin key without scopes, grant full access
-  if (!scopesPart) {
+  if (parts.length === 1 || (parts.length === 2 && ['free', 'pro', 'enterprise'].includes(parts[1].toLowerCase()))) {
     req.apiKeyScopes = ['*'];
     return true;
   }

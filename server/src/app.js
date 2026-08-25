@@ -14,11 +14,12 @@ import {
 } from "./http-utils.js";
 import { requestContextStore } from "./request-context.js";
 import { logger } from "./logger.js";
+import { TieredRateLimiter } from "./rate-limiter.js";
 const SERVER_VERSION = "0.1.0";
 const MIN_SDK_VERSION = "0.1.0";
-const SERVER_FEATURES = ["webhook_delivery", "batch_issuance", "event_polling"];
+const SERVER_FEATURES = ["webhook_delivery", "batch_issuance", "event_polling", "tiered_rate_limiting"];
 
-export function createApp({ config, soroban, metrics, metricsAggregator }) {
+export function createApp({ config, soroban, metrics, metricsAggregator, rateLimiter = new TieredRateLimiter() }) {
   return function app(req, res) {
     const url = new URL(
       req.url,
@@ -39,6 +40,57 @@ export function createApp({ config, soroban, metrics, metricsAggregator }) {
     if (setCorsHeaders(req, res, config)) {
       // Preflight OPTIONS request
       return res.writeHead(204).end();
+    }
+
+    // Extract tier from API key or headers early if present
+    const authHeader = req.headers["authorization"] || req.headers["x-api-key"];
+    if (authHeader) {
+      const token = typeof authHeader === "string" ? authHeader.replace(/^Bearer\s+/i, "") : "";
+      const parts = token.split(":");
+      if (parts.length >= 2 && ["free", "pro", "enterprise"].includes(parts[1].toLowerCase())) {
+        req.userTier = parts[1].toLowerCase();
+      }
+    }
+    if (req.headers["x-user-tier"]) {
+      req.userTier = req.headers["x-user-tier"].toLowerCase();
+    }
+
+    // Rate limiting check (exempt /info, /health, /metrics)
+    const isExempt = ["/info", "/health", "/metrics"].includes(url.pathname);
+    if (!isExempt) {
+      const rateResult = rateLimiter.consume(req);
+      res.setHeader("X-RateLimit-Tier", rateResult.tier);
+      res.setHeader("X-RateLimit-Limit", String(rateResult.limit));
+      res.setHeader("X-RateLimit-Remaining", String(rateResult.remaining));
+      res.setHeader("X-RateLimit-Reset", String(rateResult.resetAt));
+
+      if (!rateResult.allowed) {
+        res.setHeader("Retry-After", String(rateResult.retryAfter));
+        if (rateResult.tier === "free") {
+          res.setHeader(
+            "X-Upgrade-Available",
+            "Upgrade to Pro or Enterprise for higher limits: https://soroban-identity.org/pricing"
+          );
+        }
+        return sendJson(res, 429, {
+          error: "rate_limit_exceeded",
+          code: "RATE_LIMIT_EXCEEDED",
+          message: rateResult.tier === "free"
+            ? `Free tier rate limit exceeded (${rateResult.limit} req/min). Upgrade to Pro (300 req/min) or Enterprise (1200 req/min) for higher limits.`
+            : `Rate limit exceeded for tier '${rateResult.tier}' (${rateResult.limit} req/min).`,
+          tier: rateResult.tier,
+          ...(rateResult.tier === "free"
+            ? {
+                upgrade: {
+                  message: "Upgrade to Pro or Enterprise for increased rate limits.",
+                  upgradeUrl: "https://soroban-identity.org/pricing",
+                  availableTiers: ["pro", "enterprise"],
+                },
+              }
+            : {}),
+          retryAfter: rateResult.retryAfter,
+        });
+      }
     }
 
     return requestContextStore.run({ requestId }, async () => {
