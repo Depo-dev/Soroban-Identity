@@ -93,17 +93,17 @@ retry_command() {
   local attempt=1
 
   while [ "$attempt" -le "$max_attempts" ]; do
-    echo "Attempt $attempt/$max_attempts..."
+    echo "Attempt $attempt/$max_attempts..." >&2
     if "$@"; then
       return 0
     fi
-    echo "Failed. Retrying in ${delay}s..."
+    echo "Failed. Retrying in ${delay}s..." >&2
     sleep "$delay"
     delay=$((delay * 2))
     attempt=$((attempt + 1))
   done
 
-  echo "All attempts failed."
+  echo "All attempts failed." >&2
   return 1
 }
 

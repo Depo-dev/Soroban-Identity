@@ -32,6 +32,7 @@ import {
   validateContentType,
 } from "./http-utils.js";
 import { requestContextStore } from "./request-context.js";
+import { handleEventsRequest } from "./sse.js";
 import { logger } from "./logger.js";
 import { TieredRateLimiter } from "./rate-limiter.js";
 import { ApiKeyService } from "./api-keys.js";
@@ -163,6 +164,11 @@ export function createApp({ config, soroban, metrics, metricsAggregator, webhook
           });
         }
 
+        if (req.method === "GET" && url.pathname === "/events") {
+          return handleEventsRequest(req, res, url, { config, soroban });
+        }
+
+        if (req.method === "GET" && url.pathname === "/metrics") {
         if (req.method === "GET" && pathname === "/metrics") {
           if (metricsAggregator)
             await metricsAggregator
