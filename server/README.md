@@ -144,41 +144,41 @@ Every mutating endpoint and every query-bearing endpoint is validated with a
 
 ### Sanitization
 
-All string inputs are sanitized before schema checks run: surrounding
-whitespace is trimmed and ASCII control characters (including NUL and the C1
-range) are stripped, from values *and* object keys. A value that is only
-padding therefore fails its schema rather than being silently accepted.
+All three skip authentication and rate limiting.
 
-### Custom validators
-
-| Validator | Accepts |
-| --- | --- |
-| `stellarAccount` | `G` followed by 55 base32 characters. |
-| `stellarContract` | `C` followed by 55 base32 characters. |
-| `did` | `did:stellar:<STELLAR_ACCOUNT>`. |
-| `credentialId` | 3-128 characters of `A-Z a-z 0-9 . _ : -` — no `/` or whitespace, so an id can never alter routing. |
-| `subject` | Either a Stellar account address or a `did:stellar` DID. |
-| `httpUrl` | An absolute `http:` or `https:` URL. |
-
-### Error responses
-
-A failed request returns `400` with one entry per offending field:
+`/health` probes storage, RPC, contracts, and Redis in parallel, each with its
+own `HEALTH_PROBE_TIMEOUT_MS` budget, and reports per-dependency status, latency,
+and error message:
 
 ```json
 {
-  "error": "validation_failed",
-  "code": "VALIDATION_FAILED",
-  "message": "Request validation failed.",
-  "errors": [
-    { "field": "id", "source": "body", "message": "Must be 3-128 characters using letters, digits, dot, underscore, colon or hyphen", "code": "custom" },
-    { "field": "limit", "source": "query", "message": "Must be between 1 and 200", "code": "custom" }
-  ]
+  "status": "degraded",
+  "version": "0.1.0",
+  "uptimeSeconds": 3742,
+  "startedAt": "2026-01-01T00:00:00.000Z",
+  "nodeVersion": "v20.11.0",
+  "dependencies": {
+    "storage":   { "status": "up",       "latencyMs": 2,  "dataDir": "data", "writable": true },
+    "rpc":       { "status": "up",       "latencyMs": 41, "rpcStatus": "healthy", "latestLedger": 51234 },
+    "contracts": { "status": "degraded", "latencyMs": 88, "reachable": 2, "total": 3 },
+    "redis":     { "status": "disabled", "latencyMs": 0,  "reason": "REDIS_URL is not configured" }
+  }
 }
 ```
 
-`source` is one of `body`, `query`, `params` or `headers`, so a client can map
-each error back to the part of the request that produced it. Errors from every
-section are collected in a single pass rather than reported one at a time.
+Dependency states are `up`, `degraded`, `down`, and `disabled`. A `disabled`
+dependency is one that is not configured, and never counts against overall
+health. Overall `status` is `unhealthy` if any dependency is `down`, `degraded`
+if any is `degraded`, otherwise `healthy`.
+
+`/health` returns `503` only when the overall status is `unhealthy`, so a
+partially degraded deployment is not pulled out of a load balancer.
+
+`/ready` gates on storage and RPC alone — the dependencies required to answer a
+request — and names what is failing. Unreachable contracts or a cold cache leave
+most endpoints serviceable, so they are reported by `/health` but do not block
+readiness. `/live` probes nothing at all, so a dependency outage never causes an
+orchestrator to restart an otherwise healthy process.
 
 ## API Key Scopes
 

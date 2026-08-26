@@ -12,6 +12,7 @@ import {
   readWebhooks,
   WebhookDeliveryService,
 } from "./webhooks.js";
+import { collectHealth, collectReadiness } from "./health.js";
 import { readNotificationLog, summarizeNotificationLog } from "./notification-log.js";
 import { createDataLoaders } from "./dataloader.js";
 import { executeGraphQL, renderGraphiQLPlayground } from "./graphql.js";
@@ -48,19 +49,7 @@ const SERVER_FEATURES = [
   "api_versioning",
 ];
 
-export function createApp({
-  config,
-  soroban,
-  metrics,
-  metricsAggregator,
-  webhookService = new WebhookDeliveryService(config),
-  apiKeyService = new ApiKeyService(config),
-  rateLimiter = new TieredRateLimiter(),
-}) {
-  // Expose the key service on config so http-utils.requireAuth can validate
-  // issued API keys instead of falling back to the single admin key.
-  config.apiKeyService = apiKeyService;
-
+export function createApp({ config, soroban, metrics, metricsAggregator, redisClient = null, webhookService = new WebhookDeliveryService(config) }) {
   return async function app(req, res) {
     const url = new URL(
       req.url,
@@ -120,7 +109,7 @@ export function createApp({
     }
 
     // Rate limiting check (exempt /info, /health, /metrics)
-    const isExempt = ["/info", "/health", "/metrics"].includes(url.pathname);
+    const isExempt = ["/info", "/health", "/ready", "/live", "/metrics"].includes(url.pathname);
     if (!isExempt) {
       const rateResult = rateLimiter.consume(req);
       res.setHeader("X-RateLimit-Tier", rateResult.tier);
@@ -170,16 +159,50 @@ export function createApp({
         }
 
         if (req.method === "GET" && pathname === "/health") {
-          const contracts = await soroban.pingAllContracts();
-          const ok = Object.values(contracts).every(Boolean);
-          return sendJson(res, ok ? 200 : 503, {
-            status: ok ? "ok" : "degraded",
+          const health = await collectHealth({
+            config,
+            soroban,
+            redisClient,
+            version: SERVER_VERSION,
+          });
+
+          const contracts = health.dependencies.contracts?.contracts ?? {};
+          // 200 while the service can still answer requests; 503 only when a
+          // required dependency is down, so a partially-degraded deployment is
+          // not pulled out of a load balancer.
+          const statusCode = health.status === "unhealthy" ? 503 : 200;
+
+          return sendJson(res, statusCode, {
+            ...health,
+            // Retained for existing consumers of this endpoint.
             apiVersion: version,
             supportedVersions: SUPPORTED_VERSIONS,
             deprecatedVersions: DEPRECATED_VERSIONS,
             defaultVersion: DEFAULT_VERSION,
             contracts,
             circuitBreaker: soroban.circuitBreaker.toHealthInfo(),
+          });
+        }
+
+        if (req.method === "GET" && pathname === "/ready") {
+          const readiness = await collectReadiness({
+            config,
+            soroban,
+            redisClient,
+            version: SERVER_VERSION,
+          });
+          return sendJson(res, readiness.ready ? 200 : 503, readiness);
+        }
+
+        if (req.method === "GET" && pathname === "/live") {
+          // Liveness answers "is the process still running and able to respond"
+          // and must never probe a dependency: a dependency outage should not
+          // cause the orchestrator to restart an otherwise healthy process.
+          return sendJson(res, 200, {
+            status: "alive",
+            version: SERVER_VERSION,
+            uptimeSeconds: Math.floor(process.uptime()),
+            timestamp: new Date().toISOString(),
           });
         }
 

@@ -186,6 +186,8 @@ export function loadConfig(env = process.env) {
     credentialStorePath: env.CREDENTIAL_STORE_PATH
       ? path.resolve(env.CREDENTIAL_STORE_PATH)
       : path.join(DEFAULT_DATA_DIR, "credentials.json"),
+    healthProbeTimeoutMs: parseInteger(env.HEALTH_PROBE_TIMEOUT_MS, 2000),
+    redisUrl: env.REDIS_URL ?? "",
     expiryWarningDays: parseInteger(env.EXPIRY_WARNING_DAYS, 7),
     expiryReminderThresholds: parseThresholds(
       env.EXPIRY_REMINDER_THRESHOLDS,
@@ -381,6 +383,8 @@ export function logDefaultValues(env = process.env) {
     { key: "EXPIRY_WARNING_DAYS", defaultVal: "7" },
     { key: "EXPIRY_JOB_INTERVAL_MS", defaultVal: "3600000" },
     { key: "EXPIRY_CONCURRENCY", defaultVal: "8" },
+    { key: "HEALTH_PROBE_TIMEOUT_MS", defaultVal: "2000" },
+    { key: "REDIS_URL", defaultVal: "'' (disabled)" },
     { key: "EXPIRY_CRON_SCHEDULE", defaultVal: "'' (interval mode)" },
     { key: "NOTIFICATION_WEBHOOK_URL", defaultVal: "''" },
     { key: "EMAIL_API_URL", defaultVal: "''" },
