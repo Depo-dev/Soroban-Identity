@@ -465,7 +465,12 @@ export default function CredentialsPanel({ verifyId }: { verifyId?: string | nul
 
         {/* Subject search */}
         <div style={{ display: "flex", gap: "0.5rem", marginBottom: "1rem" }}>
+          <label htmlFor="credential-search" className="visually-hidden">
+            Search credentials by subject address
+          </label>
           <input
+            id="credential-search"
+            type="search"
             placeholder="Search by subject address (G…)"
             value={searchAddress}
             onChange={(e) => setSearchAddress(e.target.value)}
@@ -673,7 +678,11 @@ export default function CredentialsPanel({ verifyId }: { verifyId?: string | nul
 
       <div className="card">
         <h2>Verify Credential</h2>
+        <label htmlFor="verify-credential-id" className="visually-hidden">
+          Credential ID to verify
+        </label>
         <input
+          id="verify-credential-id"
           placeholder="Credential ID (hex)"
           value={credId}
           onChange={(e) => setCredId(e.target.value)}
@@ -731,12 +740,14 @@ export default function CredentialsPanel({ verifyId }: { verifyId?: string | nul
                 {claims.map((claim, idx) => (
                   <div key={idx} style={{ display: "flex", gap: "0.5rem", marginBottom: "0.5rem" }}>
                     <input
+                      aria-label={`Claim key ${idx + 1}`}
                       placeholder="Key"
                       value={claim.key}
                       onChange={(e) => handleClaimChange(idx, "key", e.target.value)}
                       style={{ flex: 1 }}
                     />
                     <input
+                      aria-label={`Claim value ${idx + 1}`}
                       placeholder="Value"
                       value={claim.value}
                       onChange={(e) => handleClaimChange(idx, "value", e.target.value)}
