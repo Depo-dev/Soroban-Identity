@@ -5,6 +5,7 @@ import { ensureDataDir } from './storage.js';
 import { ExpiryNotificationJob } from './expiry.js';
 import { MetricsAggregator, MetricsService } from './metrics.js';
 import { SorobanClient } from './soroban.js';
+import { DidCache } from './did-cache.js';
 import { WebhookDeliveryService } from './webhooks.js';
 import { logger } from './logger.js';
 
@@ -30,14 +31,24 @@ logDefaultValues();
 const config = loadConfig();
 await ensureDataDir(config);
 const metrics = new MetricsService();
-const soroban = new SorobanClient(config, metrics);
+const didCache = new DidCache(config, { metrics });
+// Connecting never throws: a cache outage must not stop the server booting.
+await didCache.connect();
+const soroban = new SorobanClient(config, metrics, { didCache });
+
+if (config.didCacheWarmList.length > 0) {
+  // Warm in the background so startup is not blocked on RPC round trips.
+  void didCache
+    .warm(config.didCacheWarmList, (did) => soroban.resolveDid(did))
+    .catch((error) => logger.error({ error: error.message }, 'DID cache warm failed'));
+}
 const webhookService = new WebhookDeliveryService(config);
 const metricsAggregator = new MetricsAggregator(soroban, metrics, { startLedger: Number.parseInt(process.env.METRICS_START_LEDGER ?? '0', 10) });
 const expiryJob = new ExpiryNotificationJob(config, soroban);
 
 if (process.env.DISABLE_EXPIRY_JOB !== 'true') expiryJob.start();
 
-const server = http.createServer(createApp({ config, soroban, metrics, metricsAggregator, webhookService }));
+const server = http.createServer(createApp({ config, soroban, metrics, metricsAggregator, didCache, webhookService }));
 
 
 const connections = new Set();
@@ -78,6 +89,7 @@ function shutdown(signal) {
     try {
       webhookService.drain();
       await soroban.drain();
+      await didCache.close();
     } catch (error) {
       logger.error({ error: error.message, stack: error.stack }, 'Error during drain');
     }

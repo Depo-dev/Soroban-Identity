@@ -28,120 +28,68 @@ The server configuration can be customized using the following environment varia
 | `AUDIT_LOG_RETENTION_DAYS` | Number of days to retain rotated audit logs. | `30` |
 | `CREDENTIAL_STORE_PATH` | Storage location for credential records. | `[DATA_DIR]/credentials.json` |
 | `EXPIRY_CONCURRENCY` | Maximum concurrent credential expiry notifications. Controls parallelism to prevent event loop blocking. | `8` |
-| `HEALTH_PROBE_TIMEOUT_MS` | Per-dependency timeout for health and readiness probes. | `2000` |
-| `REDIS_URL` | Redis connection URL. Unset means the cache dependency reports `disabled`. | unset |
+| `REDIS_URL` | Redis connection URL (`redis://` or `rediss://`). Unset disables the DID cache. | unset |
+| `DID_CACHE_TTL_MS` | TTL applied to cached DID documents. | `60000` |
+| `REDIS_MAX_RETRIES` | Connection attempts before the cache is left unavailable. | `5` |
+| `REDIS_RETRY_BASE_MS` | Base delay for connection backoff. | `200` |
+| `REDIS_COMMAND_TIMEOUT_MS` | Per-command timeout. | `1000` |
+| `CACHE_FAILURE_THRESHOLD` | Consecutive failures before the cache is bypassed. | `3` |
+| `DID_CACHE_WARM_LIST` | Comma-separated DIDs or addresses to pre-resolve at startup. | unset |
 
-## Metrics
+## DID Resolution Cache
 
-The server exposes a Prometheus-compatible scrape endpoint at `GET /metrics`,
-rendered by [prom-client](https://github.com/siimon/prom-client). The endpoint
-is exempt from rate limiting and from request-id assignment so a scraper does
-not consume a caller's quota.
+`SorobanClient.resolveDid()` reads through a Redis cache when `REDIS_URL` is
+set, cutting repeat resolutions of the same DID down to one Redis round trip
+instead of an RPC call.
 
-```bash
-curl http://localhost:3001/metrics
-```
+### Graceful degradation
 
-Each `MetricsService` owns a private registry, so metrics never leak between
-instances (which matters for tests). Sample scrape config:
+The cache is never on the critical path. A miss, a Redis error, a command
+timeout, or a completely unreachable Redis all fall through to the contract, so
+resolution still succeeds — just slower. Specifically:
 
-```yaml
-scrape_configs:
-  - job_name: soroban-identity
-    static_configs:
-      - targets: ['localhost:3001']
-```
+- A failed connection at startup logs and continues; the server boots uncached.
+- After `CACHE_FAILURE_THRESHOLD` consecutive failures the cache is bypassed
+  entirely and a reconnect runs in the background, so requests stop paying the
+  Redis timeout on every call. A successful reconnect closes the breaker.
+- A corrupt cache entry is treated as a miss and deleted, rather than being
+  left to poison every later read of that DID.
+- Only real documents are cached. A negative result is never stored, so a DID
+  created moments later is not invisible for the whole TTL.
 
-### HTTP metrics
+### Keys and invalidation
 
-| Metric | Type | Labels | Meaning |
-| --- | --- | --- | --- |
-| `http_requests_total` | counter | `method`, `route`, `status_code` | Requests handled. |
-| `http_request_duration_seconds` | histogram | `method`, `route`, `status_code` | Request latency. Buckets: 5ms - 10s. |
-| `http_requests_in_flight` | gauge | — | Requests currently being processed. |
+`did:stellar:G...` and a bare `G...` normalise to the same key
+(`did:doc:<address>`), so the two forms cannot drift apart on invalidation.
 
-`route` is the matched route *pattern*, never the raw path: `/credentials/abc`
-is labelled `/credentials/:id`. Unrecognised paths collapse to `unmatched`, so
-a scanner probing random URLs cannot inflate series cardinality.
+`SorobanClient.invalidateDid()` drops one entry — call it after any write that
+changes a document. Two admin endpoints expose this operationally:
 
-### Business metrics
-
-| Metric | Type | Labels | Meaning |
-| --- | --- | --- | --- |
-| `dids_created_total` | counter | — | DIDs created, from on-chain events. |
-| `credentials_issued_total` | counter | — | Credentials issued, from on-chain events. |
-| `credentials_revoked_total` | counter | — | Credentials revoked, from on-chain events. |
-| `reputation_scores_submitted_total` | counter | — | Reputation scores submitted. |
-| `credentials_verified_total` | counter | `result` | Verification attempts. `result` is `verified`, `revoked`, `expired` or `not_found`. |
-| `active_dids` | gauge | — | Distinct DIDs holding at least one active credential. |
-| `active_credentials` | gauge | `type` | Active credentials per credential type. |
-| `credential_types` | gauge | — | Distinct credential types in the store. |
-
-A credential counts as active when it is not revoked and either has no expiry
-(`expiresAt` of `0`) or expires in the future. The gauges are recomputed at
-scrape time from the credential store, so they reflect current state rather
-than the state at the last write.
-
-### RPC metrics
-
-| Metric | Type | Meaning |
+| Endpoint | Scope | Description |
 | --- | --- | --- |
-| `soroban_rpc_call_latency_seconds` | histogram | Soroban RPC call latency. Buckets: 50ms - 10s. |
-| `rpc_cache_hits_total` | counter | RPC cache hits. |
-| `rpc_cache_misses_total` | counter | RPC cache misses. |
-| `rpc_retries_total` | counter | RPC call retries. |
+| `GET /cache/stats` | `admin:read` | Hits, misses, errors, invalidations, and hit rate |
+| `DELETE /cache/dids` | `admin:write` | Flush every cached DID (SCAN-based, never `KEYS`) |
+| `DELETE /cache/dids/:did` | `admin:write` | Invalidate one DID |
 
-### Node.js runtime metrics
+### Metrics
 
-`prom-client`'s default collectors are registered, so the scrape also carries
-process and runtime series: `process_cpu_user_seconds_total`,
-`process_resident_memory_bytes`, `nodejs_heap_size_used_bytes`,
-`nodejs_eventloop_lag_seconds`, `nodejs_active_handles`, GC durations and
-version info.
+`did_cache_hits_total`, `did_cache_misses_total`, `did_cache_sets_total`,
+`did_cache_errors_total`, and `did_cache_invalidations_total` are exported on
+`/metrics` alongside the existing counters.
 
-## Request Validation
+### Warming
 
-| Endpoint | Purpose | Codes |
-| --- | --- | --- |
-| `GET /health` | Full dependency report with version and uptime | `200` healthy or degraded, `503` unhealthy |
-| `GET /ready` | Kubernetes readiness probe | `200` ready, `503` not ready |
-| `GET /live` | Kubernetes liveness probe | always `200` while the process responds |
+`DID_CACHE_WARM_LIST` pre-resolves a comma-separated set of DIDs at startup.
+Warming runs in the background so boot is not blocked on RPC round trips, and
+one failing DID does not abort the rest.
 
-All three skip authentication and rate limiting.
+### Redis client
 
-`/health` probes storage, RPC, contracts, and Redis in parallel, each with its
-own `HEALTH_PROBE_TIMEOUT_MS` budget, and reports per-dependency status, latency,
-and error message:
-
-```json
-{
-  "status": "degraded",
-  "version": "0.1.0",
-  "uptimeSeconds": 3742,
-  "startedAt": "2026-01-01T00:00:00.000Z",
-  "nodeVersion": "v20.11.0",
-  "dependencies": {
-    "storage":   { "status": "up",       "latencyMs": 2,  "dataDir": "data", "writable": true },
-    "rpc":       { "status": "up",       "latencyMs": 41, "rpcStatus": "healthy", "latestLedger": 51234 },
-    "contracts": { "status": "degraded", "latencyMs": 88, "reachable": 2, "total": 3 },
-    "redis":     { "status": "disabled", "latencyMs": 0,  "reason": "REDIS_URL is not configured" }
-  }
-}
-```
-
-Dependency states are `up`, `degraded`, `down`, and `disabled`. A `disabled`
-dependency is one that is not configured, and never counts against overall
-health. Overall `status` is `unhealthy` if any dependency is `down`, `degraded`
-if any is `degraded`, otherwise `healthy`.
-
-`/health` returns `503` only when the overall status is `unhealthy`, so a
-partially degraded deployment is not pulled out of a load balancer.
-
-`/ready` gates on storage and RPC alone — the dependencies required to answer a
-request — and names what is failing. Unreachable contracts or a cold cache leave
-most endpoints serviceable, so they are reported by `/health` but do not block
-readiness. `/live` probes nothing at all, so a dependency outage never causes an
-orchestrator to restart an otherwise healthy process.
+The client is implemented directly against `node:net`/`node:tls` in
+`src/redis-client.js`, because this server ships with pino as its only runtime
+dependency. It speaks RESP, supports `redis://` and `rediss://` with optional
+auth and database selection, and covers GET, SET with TTL, DEL, SCAN, and PING
+with connection retry and per-command timeouts.
 
 ## API Key Scopes
 

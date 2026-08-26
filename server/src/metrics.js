@@ -47,6 +47,22 @@ function readCounter(counter) {
 }
 
 export class MetricsService {
+  constructor() {
+    this.counters = {
+      dids_created_total: 0,
+      credentials_issued_total: 0,
+      credentials_revoked_total: 0,
+      reputation_scores_submitted_total: 0,
+      rpc_cache_hits_total: 0,
+      rpc_cache_misses_total: 0,
+      did_cache_hits_total: 0,
+      did_cache_misses_total: 0,
+      did_cache_sets_total: 0,
+      did_cache_errors_total: 0,
+      did_cache_invalidations_total: 0,
+      rpc_retries_total: 0,
+    };
+    this.rpcLatencies = [];
   /**
    * @param {object} [options]
    * @param {boolean} [options.collectDefaultMetrics=true] - Register Node.js
@@ -257,6 +273,38 @@ export class MetricsService {
    * @returns {Promise<string>}
    */
   renderPrometheus() {
+    const lines = [];
+    for (const [name, value] of Object.entries(this.counters)) {
+      // Add HELP annotations for each counter
+      let helpText = '';
+      if (name === 'dids_created_total') helpText = 'Total number of DIDs created';
+      else if (name === 'credentials_issued_total') helpText = 'Total number of credentials issued';
+      else if (name === 'credentials_revoked_total') helpText = 'Total number of credentials revoked';
+      else if (name === 'reputation_scores_submitted_total') helpText = 'Total number of reputation scores submitted';
+      else if (name === 'did_cache_hits_total') helpText = 'Total DID document cache hits';
+      else if (name === 'did_cache_misses_total') helpText = 'Total DID document cache misses';
+      else if (name === 'did_cache_sets_total') helpText = 'Total DID documents written to the cache';
+      else if (name === 'did_cache_errors_total') helpText = 'Total DID cache operation failures';
+      else if (name === 'did_cache_invalidations_total') helpText = 'Total DID cache invalidations';
+      else if (name === 'rpc_cache_hits_total') helpText = 'Total number of RPC cache hits';
+      else if (name === 'rpc_cache_misses_total') helpText = 'Total number of RPC cache misses';
+      else if (name === 'rpc_retries_total') helpText = 'Total number of RPC retries';
+      
+      if (helpText) lines.push(`# HELP ${name} ${helpText}`);
+      lines.push(`# TYPE ${name} counter`, `${name} ${value}`);
+    }
+    
+    lines.push('# HELP soroban_rpc_call_latency_seconds Soroban RPC call latency in seconds');
+    lines.push('# TYPE soroban_rpc_call_latency_seconds histogram');
+    let cumulative = 0;
+    for (const bucket of HISTOGRAM_BUCKETS) {
+      cumulative = this.rpcLatencies.filter((value) => value <= bucket).length;
+      lines.push(`soroban_rpc_call_latency_seconds_bucket{le="${bucket}"} ${cumulative}`);
+    }
+    lines.push(`soroban_rpc_call_latency_seconds_bucket{le="+Inf"} ${this.rpcLatencies.length}`);
+    lines.push(`soroban_rpc_call_latency_seconds_sum ${this.rpcLatencies.reduce((sum, value) => sum + value, 0)}`);
+    lines.push(`soroban_rpc_call_latency_seconds_count ${this.rpcLatencies.length}`);
+    return `${lines.join('\n')}\n`;
     return this.registry.metrics();
   }
 

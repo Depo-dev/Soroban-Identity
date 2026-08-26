@@ -50,6 +50,20 @@ const SERVER_FEATURES = [
   "api_versioning",
 ];
 
+export function createApp({ config, soroban, metrics, metricsAggregator, didCache = null, webhookService = new WebhookDeliveryService(config) }) {
+export function createApp({
+  config,
+  soroban,
+  metrics,
+  metricsAggregator,
+  webhookService = new WebhookDeliveryService(config),
+  apiKeyService = new ApiKeyService(config),
+  rateLimiter = new TieredRateLimiter(),
+}) {
+  // Expose the key service on config so http-utils.requireAuth can validate
+  // issued API keys instead of falling back to the single admin key.
+  config.apiKeyService = apiKeyService;
+
 export function createApp({ config, soroban, metrics, metricsAggregator, redisClient = null, webhookService = new WebhookDeliveryService(config) }) {
   return async function app(req, res) {
     const url = new URL(
@@ -487,6 +501,23 @@ export function createApp({ config, soroban, metrics, metricsAggregator, redisCl
           return sendJson(res, 200, { logs });
         }
 
+        if (req.method === "GET" && pathname === "/cache/stats") {
+          if (!requireAuth(req, res, config, ['admin:read'])) return;
+          return sendJson(res, 200, didCache ? didCache.getStats() : { enabled: false });
+        }
+
+        if (req.method === "DELETE" && pathname === "/cache/dids") {
+          if (!requireAuth(req, res, config, ['admin:write'])) return;
+          const cleared = didCache ? await didCache.invalidateAll() : 0;
+          return sendJson(res, 200, { cleared });
+        }
+
+        const cacheDidMatch = pathname.match(/^\/cache\/dids\/([^/]+)$/);
+        if (req.method === "DELETE" && cacheDidMatch) {
+          if (!requireAuth(req, res, config, ['admin:write'])) return;
+          const did = decodeURIComponent(cacheDidMatch[1]);
+          const invalidated = didCache ? await didCache.invalidate(did) : false;
+          return sendJson(res, 200, { did, invalidated });
         if (req.method === "GET" && pathname === "/notifications/summary") {
           if (!requireAuth(req, res, config, ['admin:read'])) return;
           const summary = await summarizeNotificationLog(config);
