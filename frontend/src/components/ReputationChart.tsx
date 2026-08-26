@@ -80,10 +80,14 @@ export default function ReputationChart({ history, isLoading = false }: Props) {
     <div>
       <div style={{ marginBottom: "1rem", display: "flex", gap: "1rem", alignItems: "flex-end", flexWrap: "wrap" }}>
         <div>
-          <label style={{ display: "block", fontSize: "0.85rem", marginBottom: "0.25rem", fontWeight: 500 }}>
+          <label
+            htmlFor="reputation-start-date"
+            style={{ display: "block", fontSize: "0.85rem", marginBottom: "0.25rem", fontWeight: 500 }}
+          >
             Start Date
           </label>
           <input
+            id="reputation-start-date"
             type="date"
             value={startDate}
             onChange={(e) => setStartDate(e.target.value)}
@@ -96,10 +100,14 @@ export default function ReputationChart({ history, isLoading = false }: Props) {
           />
         </div>
         <div>
-          <label style={{ display: "block", fontSize: "0.85rem", marginBottom: "0.25rem", fontWeight: 500 }}>
+          <label
+            htmlFor="reputation-end-date"
+            style={{ display: "block", fontSize: "0.85rem", marginBottom: "0.25rem", fontWeight: 500 }}
+          >
             End Date
           </label>
           <input
+            id="reputation-end-date"
             type="date"
             value={endDate}
             onChange={(e) => setEndDate(e.target.value)}

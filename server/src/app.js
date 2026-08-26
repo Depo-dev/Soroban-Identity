@@ -12,6 +12,7 @@ import {
   readWebhooks,
   WebhookDeliveryService,
 } from "./webhooks.js";
+import { readNotificationLog, summarizeNotificationLog } from "./notification-log.js";
 import { createDataLoaders } from "./dataloader.js";
 import { executeGraphQL, renderGraphiQLPlayground } from "./graphql.js";
 import {
@@ -414,6 +415,26 @@ export function createApp({
           const webhookId = validated.data.query.webhookId ?? null;
           const logs = await readWebhookLogs(config, { webhookId, limit });
           return sendJson(res, 200, { logs });
+        }
+
+        if (req.method === "GET" && pathname === "/notifications/logs") {
+          if (!requireAuth(req, res, config, ['admin:read'])) return;
+          const limit = Number.parseInt(url.searchParams.get("limit") ?? "50", 10) || 50;
+          if (limit > 200) {
+            return sendJson(res, 400, { code: "INVALID_REQUEST", message: "limit must not exceed 200" });
+          }
+          const logs = await readNotificationLog(config, {
+            limit,
+            credentialId: url.searchParams.get("credentialId") ?? undefined,
+            status: url.searchParams.get("status") ?? undefined,
+          });
+          return sendJson(res, 200, { logs });
+        }
+
+        if (req.method === "GET" && pathname === "/notifications/summary") {
+          if (!requireAuth(req, res, config, ['admin:read'])) return;
+          const summary = await summarizeNotificationLog(config);
+          return sendJson(res, 200, summary);
         }
 
         const webhookTestMatch = pathname.match(/^\/webhooks\/([^/]+)\/test$/);

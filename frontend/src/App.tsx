@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from "react";
+import { useState, useEffect, useCallback, useRef } from "react";
 import { useTranslation } from "react-i18next";
 import { SorobanRpc } from "@stellar/stellar-sdk";
 import IdentityPanel from "./components/IdentityPanel";
@@ -31,8 +31,11 @@ export enum Tab {
   Credentials = "credentials",
 }
 
+const TAB_ORDER: Tab[] = [Tab.Identity, Tab.Credentials];
+
 export default function App() {
   const [tab, setTab] = useState<Tab>(Tab.Identity);
+  const tabRefs = useRef<Partial<Record<Tab, HTMLButtonElement | null>>>({});
   const [activeNetwork, setActiveNetwork] = useState<NetworkName>(DEFAULT_NETWORK);
   const [verifyId, setVerifyId] = useState<string | null>(null);
   const networkConfig = NETWORK_CONFIGS[activeNetwork];
@@ -104,9 +107,40 @@ export default function App() {
     setLocale(e.target.value);
   };
 
+  // WAI-ARIA tab pattern: Left/Right cycle, Home/End jump to the ends.
+  const handleTabKeyDown = (event: React.KeyboardEvent<HTMLDivElement>) => {
+    const currentIndex = TAB_ORDER.indexOf(tab);
+    let nextIndex: number | null = null;
+
+    switch (event.key) {
+      case "ArrowRight":
+        nextIndex = (currentIndex + 1) % TAB_ORDER.length;
+        break;
+      case "ArrowLeft":
+        nextIndex = (currentIndex - 1 + TAB_ORDER.length) % TAB_ORDER.length;
+        break;
+      case "Home":
+        nextIndex = 0;
+        break;
+      case "End":
+        nextIndex = TAB_ORDER.length - 1;
+        break;
+      default:
+        return;
+    }
+
+    event.preventDefault();
+    const nextTab = TAB_ORDER[nextIndex];
+    setTab(nextTab);
+    tabRefs.current[nextTab]?.focus();
+  };
+
   return (
     <ToastProvider>
       <Toast />
+      <a className="skip-link" href="#main-content">
+        {t("a11y.skipToContent")}
+      </a>
       <div className="container">
       <header style={{ position: "relative" }}>
         <h1>{t("app.title")}</h1>
@@ -123,6 +157,8 @@ export default function App() {
         >
           {isConnected !== null && (
             <div
+              role="status"
+              aria-live="polite"
               style={{
                 display: "flex",
                 alignItems: "center",
@@ -139,6 +175,7 @@ export default function App() {
               }}
             >
               <span
+                aria-hidden="true"
                 style={{
                   display: "inline-block",
                   width: "8px",
@@ -153,16 +190,17 @@ export default function App() {
           <select
             value={i18n.language}
             onChange={handleLocaleChange}
-            aria-label="Switch language"
+            aria-label={t("a11y.switchLanguage")}
             style={{ padding: "0.3rem 0.5rem", borderRadius: "0.25rem", fontSize: "0.85rem" }}
           >
             {SUPPORTED_LOCALES.map(({ code, label }) => (
               <option key={code} value={code}>{label}</option>
             ))}
           </select>
-          <label className="network-switcher" aria-label="Network">
+          <label className="network-switcher" htmlFor="network-select">
             <span>Network</span>
             <select
+              id="network-select"
               value={activeNetwork}
               onChange={(e) => setActiveNetwork(e.target.value as NetworkName)}
             >
@@ -199,7 +237,7 @@ export default function App() {
             fontSize: "0.9rem",
           }}
         >
-          ⚠ Contract not initialized: <strong>{uninitializedContracts.join(", ")}</strong>.
+          <span aria-hidden="true">⚠</span> Contract not initialized: <strong>{uninitializedContracts.join(", ")}</strong>.
           Please run the deploy script and update your contract IDs.{" "}
           <a
             href="docs/architecture.md"
@@ -227,7 +265,7 @@ export default function App() {
             fontWeight: 600,
           }}
         >
-          ⚠ You are connected to Stellar <strong>mainnet</strong>. All actions submit real
+          <span aria-hidden="true">⚠</span> You are connected to Stellar <strong>mainnet</strong>. All actions submit real
           transactions and may incur on-chain fees.
         </div>
       )}
@@ -249,12 +287,12 @@ export default function App() {
           }}
         >
           <span>
-            ⚠ {notification.count} credential{notification.count > 1 ? "s" : ""}{" "}
-            expiring within 7 days
+            <span aria-hidden="true">⚠</span> {notification.count} credential
+            {notification.count > 1 ? "s" : ""} expiring within 7 days
           </span>
           <button
             onClick={dismiss}
-            aria-label="Dismiss notification"
+            aria-label={t("a11y.dismissNotification")}
             style={{
               background: "none",
               border: "none",
@@ -268,27 +306,54 @@ export default function App() {
         </div>
       )}
 
-      <div className="tabs">
-        <button
-          className={`tab ${tab === Tab.Identity ? "active" : ""}`}
-          onClick={() => setTab(Tab.Identity)}
-        >
-          {t("tabs.identity")}
-        </button>
-        <button
-          className={`tab ${tab === Tab.Credentials ? "active" : ""}`}
-          onClick={() => setTab(Tab.Credentials)}
-        >
-          {t("tabs.credentials")}
-        </button>
+      <div
+        className="tabs"
+        role="tablist"
+        aria-label={t("tabs.label")}
+        onKeyDown={handleTabKeyDown}
+      >
+        {TAB_ORDER.map((name) => (
+          <button
+            key={name}
+            id={`tab-${name}`}
+            role="tab"
+            type="button"
+            className={`tab ${tab === name ? "active" : ""}`}
+            aria-selected={tab === name}
+            aria-controls={`panel-${name}`}
+            // Roving tabindex: only the selected tab is in the tab order, and
+            // the arrow keys move between tabs from there.
+            tabIndex={tab === name ? 0 : -1}
+            ref={(node) => {
+              tabRefs.current[name] = node;
+            }}
+            onClick={() => setTab(name)}
+          >
+            {t(`tabs.${name}`)}
+          </button>
+        ))}
       </div>
 
-      <ErrorBoundary>
-        {tab === Tab.Identity && <IdentityPanel />}
-        {tab === Tab.Credentials && (
-          <CredentialsPanel verifyId={verifyId} />
-        )}
-      </ErrorBoundary>
+      <main id="main-content" tabIndex={-1}>
+        <ErrorBoundary>
+          <div
+            id={`panel-${Tab.Identity}`}
+            role="tabpanel"
+            aria-labelledby={`tab-${Tab.Identity}`}
+            hidden={tab !== Tab.Identity}
+          >
+            {tab === Tab.Identity && <IdentityPanel />}
+          </div>
+          <div
+            id={`panel-${Tab.Credentials}`}
+            role="tabpanel"
+            aria-labelledby={`tab-${Tab.Credentials}`}
+            hidden={tab !== Tab.Credentials}
+          >
+            {tab === Tab.Credentials && <CredentialsPanel verifyId={verifyId} />}
+          </div>
+        </ErrorBoundary>
+      </main>
     </div>
     </ToastProvider>
   );
