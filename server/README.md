@@ -28,6 +28,104 @@ The server configuration can be customized using the following environment varia
 | `AUDIT_LOG_RETENTION_DAYS` | Number of days to retain rotated audit logs. | `30` |
 | `CREDENTIAL_STORE_PATH` | Storage location for credential records. | `[DATA_DIR]/credentials.json` |
 | `EXPIRY_CONCURRENCY` | Maximum concurrent credential expiry notifications. Controls parallelism to prevent event loop blocking. | `8` |
+| `CORS_ORIGIN` | Allowed browser origins. A single origin, a comma-separated list, or `*`. | `*` in development, none in production |
+| `CORS_CREDENTIALS` | Whether to send `Access-Control-Allow-Credentials`. Cannot be combined with `CORS_ORIGIN=*`. | `false` |
+| `CORS_METHODS` | Comma-separated methods advertised on a preflight. | `GET,POST,PUT,PATCH,DELETE,OPTIONS` |
+| `CORS_ALLOWED_HEADERS` | Comma-separated request headers a browser may send. | `Content-Type,Authorization,X-API-Key,X-Request-ID,X-Actor,X-User-Tier,X-API-Version` |
+| `CORS_EXPOSED_HEADERS` | Comma-separated response headers readable by browser JavaScript. | `X-Request-ID,Content-Type,X-RateLimit-Limit,X-RateLimit-Remaining,X-RateLimit-Reset,X-API-Version` |
+| `CORS_MAX_AGE` | Seconds a browser may cache a preflight result. `0` disables caching. | `86400` |
+
+## CORS
+
+Cross-origin access is configured entirely through environment variables, so a
+single build serves local development, staging and production.
+
+### Origins
+
+`CORS_ORIGIN` takes one origin, a comma-separated list, or `*`:
+
+```bash
+# Local development — the default in NODE_ENV=development
+CORS_ORIGIN=*
+
+# One origin
+CORS_ORIGIN=https://app.example.com
+
+# Several origins
+CORS_ORIGIN=https://app.example.com,https://admin.example.com,http://localhost:5173
+```
+
+An origin is matched exactly, so `https://app.example.com.evil.com` never
+matches `https://app.example.com`. When `CORS_ORIGIN` is unset the server
+allows all origins in development and none in production — a production
+deployment must name its origins rather than inherit a permissive default.
+
+`CORS_ALLOWED_ORIGINS` is still read as an alias for existing deployments;
+`CORS_ORIGIN` wins when both are set.
+
+Each value must be a bare origin (`scheme://host[:port]`). A value with a path,
+query or fragment is rejected at startup, because an `Origin` header never
+carries one and such a value could never match a real request.
+
+### Credentials
+
+```bash
+CORS_ORIGIN=https://app.example.com
+CORS_CREDENTIALS=true
+```
+
+`CORS_CREDENTIALS` accepts `true/false`, `1/0`, `yes/no` and `on/off`. It is
+`false` by default.
+
+The CORS spec forbids credentials with a wildcard origin — a browser rejects
+such a response outright — so enabling credentials while `CORS_ORIGIN` is `*`
+(including by relying on the development default) fails validation at startup
+rather than at the browser. When credentials are enabled and the origin list is
+a wildcard by other means, the server reflects the request's own origin instead
+of sending `*`.
+
+### Methods and headers
+
+```bash
+CORS_METHODS=GET,POST
+CORS_ALLOWED_HEADERS=Content-Type,X-API-Key
+CORS_EXPOSED_HEADERS=X-Request-ID,X-RateLimit-Remaining
+```
+
+`CORS_METHODS` and `CORS_ALLOWED_HEADERS` populate the preflight response.
+`CORS_EXPOSED_HEADERS` lists the response headers browser JavaScript may read;
+it defaults to `X-Request-ID`, `Content-Type`, the rate-limit headers and
+`X-API-Version`.
+
+### Preflight caching
+
+```bash
+CORS_MAX_AGE=600
+```
+
+`CORS_MAX_AGE` is the `Access-Control-Max-Age` value in seconds, defaulting to
+`86400` (24 hours). Browsers apply their own upper bound. Setting it to `0`
+disables preflight caching, which is useful while iterating on the header
+configuration.
+
+### Vary
+
+Whenever the allowed origin depends on the request — a specific origin list, or
+a wildcard with credentials enabled — the server sends `Vary: Origin` so a
+shared cache cannot serve one origin's response to another.
+
+### Example deployments
+
+```bash
+# Development
+NODE_ENV=development npm start
+
+# Staging with a credentialed dashboard
+NODE_ENV=production CORS_ORIGIN=https://staging.example.com CORS_CREDENTIALS=true npm start
+
+# Production, read-only public API, short preflight cache
+NODE_ENV=production CORS_ORIGIN=https://app.example.com,https://docs.example.com CORS_METHODS=GET,OPTIONS CORS_MAX_AGE=300 npm start
+```
 
 ## Request Validation
 

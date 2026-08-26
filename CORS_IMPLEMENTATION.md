@@ -2,71 +2,80 @@
 
 ## Summary
 
-Added configurable CORS support to the server so browser-based SDK clients can connect without proxying through Vite's dev server.
+CORS is configured entirely through environment variables so one build serves
+local development, staging and production without a code change. The full
+reference lives in [server/README.md](server/README.md#cors); this file records
+the shape of the implementation.
 
-## Changes
+## Environment variables
 
-### 1. **server/src/config.js**
+| Variable | Default | Description |
+| --- | --- | --- |
+| `CORS_ORIGIN` | `*` in development, none in production | A single origin, a comma-separated list, or `*`. |
+| `CORS_ALLOWED_ORIGINS` | — | Legacy alias for `CORS_ORIGIN`. `CORS_ORIGIN` wins when both are set. |
+| `CORS_CREDENTIALS` | `false` | Send `Access-Control-Allow-Credentials`. Accepts `true/false`, `1/0`, `yes/no`, `on/off`. |
+| `CORS_METHODS` | `GET,POST,PUT,PATCH,DELETE,OPTIONS` | Methods advertised on a preflight. |
+| `CORS_ALLOWED_HEADERS` | `Content-Type,Authorization,X-API-Key,X-Request-ID,X-Actor,X-User-Tier,X-API-Version` | Request headers a browser may send. |
+| `CORS_EXPOSED_HEADERS` | `X-Request-ID,Content-Type,X-RateLimit-Limit,X-RateLimit-Remaining,X-RateLimit-Reset,X-API-Version` | Response headers readable by browser JavaScript. |
+| `CORS_MAX_AGE` | `86400` | Seconds a browser may cache a preflight. `0` disables caching. |
 
-- Added `parseCorsOrigins()` helper to parse `CORS_ALLOWED_ORIGINS` env var
-- Defaults: `*` in development, empty list in production
-- Supports comma-separated list: `https://app.example.com,http://localhost:5173`
+## Components
 
-### 2. **server/src/http-utils.js**
+### `server/src/config.js`
 
-- Added `getAllowedOrigin()` - matches request origin against allowed list
-- Added `setCorsHeaders()` - sets CORS headers and handles OPTIONS preflight:
-  - Sets `Access-Control-Allow-Origin` if origin is allowed
-  - Sets `Access-Control-Expose-Headers` to expose `X-Request-ID`
-  - Handles OPTIONS requests with 204 response
-  - Caches preflight for 86400 seconds
+- `parseCorsOrigins()` reads `CORS_ORIGIN`, falling back to
+  `CORS_ALLOWED_ORIGINS`. Accepts one origin, a comma-separated list, or `*`.
+  Defaults to `*` in development and to an empty list in production, so a
+  production deployment must name its origins rather than inherit a permissive
+  default.
+- `parseBoolean()` and `parseList()` back `CORS_CREDENTIALS` and the
+  method/header lists. An unparseable value falls back to the default instead
+  of being silently treated as false or empty.
+- `validateConfig()` rejects, at startup:
+  - an origin that is not an absolute URL;
+  - an origin carrying a path, query or fragment — an `Origin` header never
+    has one, so such a value could never match a real request;
+  - an unparseable `CORS_CREDENTIALS`;
+  - `CORS_CREDENTIALS=true` together with a wildcard origin, which the CORS
+    spec forbids and every browser rejects;
+  - a non-numeric `CORS_MAX_AGE`.
 
-### 3. **server/src/app.js**
+### `server/src/http-utils.js`
 
-- Integrated `setCorsHeaders()` at the top of request handler
-- Responds to OPTIONS preflight before routing
+- `getAllowedOrigin()` matches the request origin against the configured list.
+  An exact match is required, so `https://app.example.com.evil.com` never
+  matches `https://app.example.com`. With a wildcard list and credentials
+  enabled it reflects the request's own origin, because `*` and credentials
+  cannot be combined.
+- `setCorsHeaders()` sets `Access-Control-Allow-Origin`,
+  `Access-Control-Allow-Credentials` (only for a specific origin, only when
+  enabled) and `Access-Control-Expose-Headers`, and answers a preflight with
+  the configured methods, allowed headers and `Access-Control-Max-Age`.
+- `Vary: Origin` is set whenever the allowed origin depends on the request, so
+  a shared cache cannot serve one origin's response to another.
 
-### 4. **server/src/cors.test.js**
+### `server/src/app.js`
 
-- Integration tests covering:
-  - Preflight OPTIONS responses (204 with headers)
-  - Allowed/blocked origins
-  - X-Request-ID exposure
-  - Wildcard support
-  - All route types (GET, POST, etc.)
-  - Disabled CORS behavior
+- Calls `setCorsHeaders()` before routing and answers OPTIONS with 204.
 
-## Environment Variables
+### `server/test/cors.test.js`
 
-| Variable               | Default          | Description                                    |
-| ---------------------- | ---------------- | ---------------------------------------------- |
-| `NODE_ENV`             | `development`    | If `development`, allows `*` unless overridden |
-| `CORS_ALLOWED_ORIGINS` | Auto (see above) | Comma-separated origins or `*`                 |
+34 tests covering environment parsing, startup validation, origin matching,
+preflight contents, the credentials rules, `Vary`, and the headers observed on
+live requests to every route type.
 
 ## Examples
 
-### Development (allow all)
-
 ```bash
+# Development — allows all origins by default
 npm start
-# NODE_ENV defaults to development, CORS allows *
+
+# Production with two origins
+NODE_ENV=production CORS_ORIGIN=https://app.example.com,https://admin.example.com npm start
+
+# Credentialed dashboard
+NODE_ENV=production CORS_ORIGIN=https://app.example.com CORS_CREDENTIALS=true npm start
+
+# Read-only public API with a short preflight cache
+NODE_ENV=production CORS_ORIGIN=https://app.example.com CORS_METHODS=GET,OPTIONS CORS_MAX_AGE=300 npm start
 ```
-
-### Production (specific origins)
-
-```bash
-NODE_ENV=production CORS_ALLOWED_ORIGINS=https://app.example.com npm start
-```
-
-### Multiple origins
-
-```bash
-CORS_ALLOWED_ORIGINS=https://app.example.com,https://app2.example.com npm start
-```
-
-## Acceptance Criteria ✅
-
-- ✅ Browser SDK on port 5173 can call all endpoints without CORS errors
-- ✅ Preflight OPTIONS requests return 204 with correct headers
-- ✅ `CORS_ALLOWED_ORIGINS=https://app.example.com` blocks other origins
-- ✅ Integration tests verify CORS headers on all route types

@@ -42,12 +42,26 @@ function parseJson(value, fallback) {
   }
 }
 
+/**
+ * Parse the allowed CORS origins.
+ *
+ * Accepts a comma-separated list, a single origin, or `*`. `CORS_ORIGIN` is
+ * the documented name; `CORS_ALLOWED_ORIGINS` is still read as an alias so
+ * existing deployments keep working.
+ *
+ * Default: allow all in development, none in production — a production
+ * deployment must name its origins explicitly rather than inheriting a
+ * permissive default.
+ *
+ * @param {string|undefined} value
+ * @param {string} nodeEnv
+ * @returns {string[]}
+ */
 function parseCorsOrigins(value, nodeEnv) {
-  // Default: allow all in development, none in production
   if (!value) {
     return nodeEnv === "development" ? ["*"] : [];
   }
-  if (value === "*") {
+  if (value.trim() === "*") {
     return ["*"];
   }
   // Comma-separated list of origins
@@ -56,6 +70,73 @@ function parseCorsOrigins(value, nodeEnv) {
     .map((origin) => origin.trim())
     .filter(Boolean);
 }
+
+/**
+ * Parse a boolean environment variable.
+ *
+ * Accepts true/1/yes/on and false/0/no/off, case-insensitively. Anything else
+ * (including an empty value) falls back to the default rather than being
+ * silently treated as false.
+ *
+ * @param {string|undefined} value
+ * @param {boolean} fallback
+ * @returns {boolean}
+ */
+function parseBoolean(value, fallback = false) {
+  if (value === undefined || value === null || value === "") return fallback;
+  const normalized = String(value).trim().toLowerCase();
+  if (["true", "1", "yes", "on"].includes(normalized)) return true;
+  if (["false", "0", "no", "off"].includes(normalized)) return false;
+  return fallback;
+}
+
+/**
+ * Parse a comma-separated list into a trimmed array, falling back to a default
+ * when the variable is unset or contains only separators.
+ *
+ * @param {string|undefined} value
+ * @param {string[]} fallback
+ * @returns {string[]}
+ */
+function parseList(value, fallback) {
+  if (!value) return fallback;
+  const items = value
+    .split(",")
+    .map((item) => item.trim())
+    .filter(Boolean);
+  return items.length > 0 ? items : fallback;
+}
+
+export const DEFAULT_CORS_METHODS = [
+  "GET",
+  "POST",
+  "PUT",
+  "PATCH",
+  "DELETE",
+  "OPTIONS",
+];
+
+export const DEFAULT_CORS_ALLOWED_HEADERS = [
+  "Content-Type",
+  "Authorization",
+  "X-API-Key",
+  "X-Request-ID",
+  "X-Actor",
+  "X-User-Tier",
+  "X-API-Version",
+];
+
+export const DEFAULT_CORS_EXPOSED_HEADERS = [
+  "X-Request-ID",
+  "Content-Type",
+  "X-RateLimit-Limit",
+  "X-RateLimit-Remaining",
+  "X-RateLimit-Reset",
+  "X-API-Version",
+];
+
+/** Preflight cache lifetime in seconds. Browsers cap this themselves. */
+export const DEFAULT_CORS_MAX_AGE = 86400;
 
 function parseThresholds(value, fallback = [30, 7, 1]) {
   if (!value) return fallback;
@@ -80,7 +161,21 @@ export function loadConfig(env = process.env) {
     port: parseInteger(env.PORT, 3001),
     adminApiKey: env.ADMIN_API_KEY ?? "",
     adminActor: env.ADMIN_ACTOR ?? "admin",
-    corsAllowedOrigins: parseCorsOrigins(env.CORS_ALLOWED_ORIGINS, nodeEnv),
+    corsAllowedOrigins: parseCorsOrigins(
+      env.CORS_ORIGIN ?? env.CORS_ALLOWED_ORIGINS,
+      nodeEnv,
+    ),
+    corsCredentials: parseBoolean(env.CORS_CREDENTIALS, false),
+    corsMethods: parseList(env.CORS_METHODS, DEFAULT_CORS_METHODS),
+    corsAllowedHeaders: parseList(
+      env.CORS_ALLOWED_HEADERS,
+      DEFAULT_CORS_ALLOWED_HEADERS,
+    ),
+    corsExposedHeaders: parseList(
+      env.CORS_EXPOSED_HEADERS,
+      DEFAULT_CORS_EXPOSED_HEADERS,
+    ),
+    corsMaxAge: parseInteger(env.CORS_MAX_AGE, DEFAULT_CORS_MAX_AGE, true),
     maxBodyBytes: parseInteger(env.MAX_BODY_BYTES, 64 * 1024),
     dataDir: env.DATA_DIR ? path.resolve(env.DATA_DIR) : DEFAULT_DATA_DIR,
     auditLogPath: env.AUDIT_LOG_PATH
@@ -168,6 +263,7 @@ export function validateConfig(env = process.env) {
     { key: "RPC_RETRY_BASE_MS", desc: "must be a valid integer" },
     { key: "RPC_RETRY_BACKOFF", desc: "must be a valid integer" },
     { key: "EVENT_POLL_INTERVAL_MS", desc: "must be a valid integer" },
+    { key: "CORS_MAX_AGE", desc: "must be a valid integer" },
   ];
 
   for (const item of numericVars) {
@@ -175,6 +271,48 @@ export function validateConfig(env = process.env) {
     if (val !== undefined && val !== "") {
       if (!/^\d+$/.test(val)) {
         invalid.push(`${item.key}: ${item.desc}`);
+      }
+    }
+  }
+
+  const corsOrigin = env.CORS_ORIGIN ?? env.CORS_ALLOWED_ORIGINS;
+  if (corsOrigin !== undefined && corsOrigin !== "" && corsOrigin.trim() !== "*") {
+    for (const origin of corsOrigin.split(",").map((o) => o.trim()).filter(Boolean)) {
+      let parsed;
+      try {
+        parsed = new URL(origin);
+      } catch {
+        invalid.push(
+          `CORS_ORIGIN: '${origin}' must be an absolute origin such as https://app.example.com, or '*'`,
+        );
+        continue;
+      }
+      // An Origin header carries scheme://host[:port] and nothing else, so a
+      // configured value with a path or query can never match a real request.
+      if (parsed.pathname !== "/" || parsed.search || parsed.hash) {
+        invalid.push(
+          `CORS_ORIGIN: '${origin}' must not include a path, query or fragment`,
+        );
+      }
+    }
+  }
+
+  const corsCredentials = env.CORS_CREDENTIALS;
+  if (corsCredentials !== undefined && corsCredentials !== "") {
+    const normalized = String(corsCredentials).trim().toLowerCase();
+    const known = ["true", "1", "yes", "on", "false", "0", "no", "off"];
+    if (!known.includes(normalized)) {
+      invalid.push("CORS_CREDENTIALS: must be one of true/false/1/0/yes/no/on/off");
+    } else if (["true", "1", "yes", "on"].includes(normalized)) {
+      // The CORS spec forbids credentials with a wildcard origin: a browser
+      // rejects the response outright, so this combination is never usable.
+      const nodeEnvValue = env.NODE_ENV ?? "development";
+      const effectiveOrigins =
+        corsOrigin ?? (nodeEnvValue === "development" ? "*" : "");
+      if (String(effectiveOrigins).trim() === "*") {
+        invalid.push(
+          "CORS_CREDENTIALS: cannot be enabled while CORS_ORIGIN is '*' — name the allowed origins explicitly",
+        );
       }
     }
   }
@@ -228,6 +366,12 @@ export function logDefaultValues(env = process.env) {
     { key: "RPC_RETRY_BASE_MS", defaultVal: "500" },
     { key: "RPC_RETRY_BACKOFF", defaultVal: "2" },
     { key: "EVENT_POLL_INTERVAL_MS", defaultVal: "5000" },
+    { key: "CORS_ORIGIN", defaultVal: "'*' in development, none in production" },
+    { key: "CORS_CREDENTIALS", defaultVal: "false" },
+    { key: "CORS_METHODS", defaultVal: DEFAULT_CORS_METHODS.join(",") },
+    { key: "CORS_ALLOWED_HEADERS", defaultVal: DEFAULT_CORS_ALLOWED_HEADERS.join(",") },
+    { key: "CORS_EXPOSED_HEADERS", defaultVal: DEFAULT_CORS_EXPOSED_HEADERS.join(",") },
+    { key: "CORS_MAX_AGE", defaultVal: String(DEFAULT_CORS_MAX_AGE) },
   ];
 
   for (const item of defaults) {
