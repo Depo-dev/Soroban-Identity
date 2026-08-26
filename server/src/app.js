@@ -12,6 +12,7 @@ import {
   readWebhooks,
   WebhookDeliveryService,
 } from "./webhooks.js";
+import { startAccessLog } from "./access-log.js";
 import { createDataLoaders } from "./dataloader.js";
 import { executeGraphQL, renderGraphiQLPlayground } from "./graphql.js";
 import {
@@ -46,8 +47,8 @@ const SERVER_FEATURES = [
   "api_versioning",
 ];
 
-export function createApp({ config, soroban, metrics, metricsAggregator, webhookService = new WebhookDeliveryService(config) }) {
-  return function app(req, res) {
+export function createApp({ config, soroban, metrics, metricsAggregator, accessLogSink = null, webhookService = new WebhookDeliveryService(config) }) {
+  return async function app(req, res) {
     const url = new URL(
       req.url,
       `http://${req.headers.host ?? "localhost"}`,
@@ -68,6 +69,17 @@ export function createApp({ config, soroban, metrics, metricsAggregator, webhook
     
     if (!isMetricsEndpoint) {
       res.setHeader("X-Request-ID", requestId);
+    }
+
+    // Access logging is attached before any routing so a request that is
+    // rejected by CORS, auth, or the rate limiter is still recorded.
+    if (config.accessLogEnabled && !isMetricsEndpoint) {
+      const finishAccessLog = startAccessLog(req, res, {
+        requestId,
+        config,
+        sink: accessLogSink,
+      });
+      res.on("finish", () => finishAccessLog({ requestBody: req.loggedBody ?? null }));
     }
 
     // Apply CORS headers
@@ -168,7 +180,6 @@ export function createApp({ config, soroban, metrics, metricsAggregator, webhook
           return handleEventsRequest(req, res, url, { config, soroban });
         }
 
-        if (req.method === "GET" && url.pathname === "/metrics") {
         if (req.method === "GET" && pathname === "/metrics") {
           if (metricsAggregator)
             await metricsAggregator

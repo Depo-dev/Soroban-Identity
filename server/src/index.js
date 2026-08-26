@@ -7,6 +7,7 @@ import { MetricsAggregator, MetricsService } from './metrics.js';
 import { SorobanClient } from './soroban.js';
 import { WebhookDeliveryService } from './webhooks.js';
 import { logger } from './logger.js';
+import { RotatingFileSink } from './access-log.js';
 
 const validationResult = validateConfig();
 if (!validationResult.isValid) {
@@ -37,7 +38,22 @@ const expiryJob = new ExpiryNotificationJob(config, soroban);
 
 if (process.env.DISABLE_EXPIRY_JOB !== 'true') expiryJob.start();
 
-const server = http.createServer(createApp({ config, soroban, metrics, metricsAggregator, webhookService }));
+let accessLogSink = null;
+if (config.accessLogEnabled && config.accessLogPath) {
+  accessLogSink = new RotatingFileSink({
+    filePath: config.accessLogPath,
+    maxBytes: config.accessLogMaxBytes,
+    maxFiles: config.accessLogMaxFiles,
+  });
+  // A file sink that cannot be opened falls back to stdout-only logging
+  // rather than preventing the server from starting.
+  await accessLogSink.open().catch((error) => {
+    logger.error({ error: error.message, path: config.accessLogPath }, 'Access log file unavailable; logging to stdout only');
+    accessLogSink = null;
+  });
+}
+
+const server = http.createServer(createApp({ config, soroban, metrics, metricsAggregator, accessLogSink, webhookService }));
 
 
 const connections = new Set();
@@ -78,6 +94,7 @@ function shutdown(signal) {
     try {
       webhookService.drain();
       await soroban.drain();
+      if (accessLogSink) await accessLogSink.close();
     } catch (error) {
       logger.error({ error: error.message, stack: error.stack }, 'Error during drain');
     }
