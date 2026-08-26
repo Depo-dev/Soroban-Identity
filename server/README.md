@@ -31,7 +31,75 @@ The server configuration can be customized using the following environment varia
 | `HEALTH_PROBE_TIMEOUT_MS` | Per-dependency timeout for health and readiness probes. | `2000` |
 | `REDIS_URL` | Redis connection URL. Unset means the cache dependency reports `disabled`. | unset |
 
-## Health and Readiness
+## Metrics
+
+The server exposes a Prometheus-compatible scrape endpoint at `GET /metrics`,
+rendered by [prom-client](https://github.com/siimon/prom-client). The endpoint
+is exempt from rate limiting and from request-id assignment so a scraper does
+not consume a caller's quota.
+
+```bash
+curl http://localhost:3001/metrics
+```
+
+Each `MetricsService` owns a private registry, so metrics never leak between
+instances (which matters for tests). Sample scrape config:
+
+```yaml
+scrape_configs:
+  - job_name: soroban-identity
+    static_configs:
+      - targets: ['localhost:3001']
+```
+
+### HTTP metrics
+
+| Metric | Type | Labels | Meaning |
+| --- | --- | --- | --- |
+| `http_requests_total` | counter | `method`, `route`, `status_code` | Requests handled. |
+| `http_request_duration_seconds` | histogram | `method`, `route`, `status_code` | Request latency. Buckets: 5ms - 10s. |
+| `http_requests_in_flight` | gauge | — | Requests currently being processed. |
+
+`route` is the matched route *pattern*, never the raw path: `/credentials/abc`
+is labelled `/credentials/:id`. Unrecognised paths collapse to `unmatched`, so
+a scanner probing random URLs cannot inflate series cardinality.
+
+### Business metrics
+
+| Metric | Type | Labels | Meaning |
+| --- | --- | --- | --- |
+| `dids_created_total` | counter | — | DIDs created, from on-chain events. |
+| `credentials_issued_total` | counter | — | Credentials issued, from on-chain events. |
+| `credentials_revoked_total` | counter | — | Credentials revoked, from on-chain events. |
+| `reputation_scores_submitted_total` | counter | — | Reputation scores submitted. |
+| `credentials_verified_total` | counter | `result` | Verification attempts. `result` is `verified`, `revoked`, `expired` or `not_found`. |
+| `active_dids` | gauge | — | Distinct DIDs holding at least one active credential. |
+| `active_credentials` | gauge | `type` | Active credentials per credential type. |
+| `credential_types` | gauge | — | Distinct credential types in the store. |
+
+A credential counts as active when it is not revoked and either has no expiry
+(`expiresAt` of `0`) or expires in the future. The gauges are recomputed at
+scrape time from the credential store, so they reflect current state rather
+than the state at the last write.
+
+### RPC metrics
+
+| Metric | Type | Meaning |
+| --- | --- | --- |
+| `soroban_rpc_call_latency_seconds` | histogram | Soroban RPC call latency. Buckets: 50ms - 10s. |
+| `rpc_cache_hits_total` | counter | RPC cache hits. |
+| `rpc_cache_misses_total` | counter | RPC cache misses. |
+| `rpc_retries_total` | counter | RPC call retries. |
+
+### Node.js runtime metrics
+
+`prom-client`'s default collectors are registered, so the scrape also carries
+process and runtime series: `process_cpu_user_seconds_total`,
+`process_resident_memory_bytes`, `nodejs_heap_size_used_bytes`,
+`nodejs_eventloop_lag_seconds`, `nodejs_active_handles`, GC durations and
+version info.
+
+## Request Validation
 
 | Endpoint | Purpose | Codes |
 | --- | --- | --- |
