@@ -32,6 +32,7 @@ import {
   setCorsHeaders,
   validateContentType,
 } from "./http-utils.js";
+import { schemas, validateRequest } from "./validation.js";
 import { requestContextStore } from "./request-context.js";
 import { handleEventsRequest } from "./sse.js";
 import { logger } from "./logger.js";
@@ -86,6 +87,11 @@ export function createApp({ config, soroban, metrics, metricsAggregator, accessL
     if (setCorsHeaders(req, res, config)) {
       // Preflight OPTIONS request
       return res.writeHead(204).end();
+    }
+
+    // Validate well-known request headers before any routing or auth work.
+    if (!validateRequest(res, schemas.commonHeaders, { headers: req.headers }).ok) {
+      return;
     }
 
     // Extract tier and API key ID from API key or headers early if present
@@ -219,15 +225,14 @@ export function createApp({ config, soroban, metrics, metricsAggregator, accessL
             if (body.__payloadTooLarge) {
               return sendJson(res, 413, { code: "PAYLOAD_TOO_LARGE", message: "Request body exceeds the size limit." });
             }
-            const { query, variables = {}, operationName } = body;
-            if (!query) {
-              return sendJson(res, 400, { errors: [{ message: "Must provide a GraphQL query." }] });
-            }
+            const validated = validateRequest(res, schemas.graphql, { body });
+            if (!validated.ok) return;
+            const { query, variables = {}, operationName } = validated.data.body;
 
             // Mutations require credentials:write or admin authorization
             const isMutation = /^\s*mutation\b/i.test(query);
             if (isMutation) {
-              if (!requireAuth(req, res, config, ["credentials:write"])) return;
+              if (!await requireAuth(req, res, config, ["credentials:write"])) return;
             }
 
             const loaders = createDataLoaders({ config, soroban });
@@ -244,15 +249,15 @@ export function createApp({ config, soroban, metrics, metricsAggregator, accessL
 
         // #390: paginated credential list
         if (req.method === "GET" && pathname === "/credentials") {
-          const limitParam = url.searchParams.get("limit") ?? "50";
-          const limitNum = Number.parseInt(limitParam, 10) || 50;
-          if (limitNum > 200) {
-            return sendJson(res, 400, { code: "INVALID_REQUEST", message: "limit must not exceed 200" });
-          }
+          const validated = validateRequest(res, schemas.listCredentials, {
+            query: url.searchParams,
+          });
+          if (!validated.ok) return;
+          const limitNum = validated.data.query.limit ?? 50;
           const credentials = await readCredentials(config);
           const { items, nextCursor } = paginateCursor(credentials, {
             limit: limitNum,
-            cursor: url.searchParams.get("cursor"),
+            cursor: validated.data.query.cursor ?? null,
           });
           if (version === "v2") {
             return sendJson(res, 200, {
@@ -277,6 +282,9 @@ export function createApp({ config, soroban, metrics, metricsAggregator, accessL
         const credentialIdMatch = pathname.match(/^\/credentials\/([^/]+)$/);
         if (req.method === "GET" && credentialIdMatch) {
           const credentialId = decodeURIComponent(credentialIdMatch[1]);
+          if (!validateRequest(res, schemas.credentialByIdParams, { params: { credentialId } }).ok) {
+            return;
+          }
           const credentials = await readCredentials(config);
           const credential = credentials.find((c) => c.id === credentialId);
           if (!credential) return notFound(res);
@@ -295,6 +303,9 @@ export function createApp({ config, soroban, metrics, metricsAggregator, accessL
           if (!await requireAuth(req, res, config, ['credentials:read'])) return;
           
           const credentialId = decodeURIComponent(verifyMatch[1]);
+          if (!validateRequest(res, schemas.credentialByIdParams, { params: { credentialId } }).ok) {
+            return;
+          }
           const credentials = await readCredentials(config);
           const credential = credentials.find((c) => c.id === credentialId);
           if (!credential) {
@@ -328,23 +339,24 @@ export function createApp({ config, soroban, metrics, metricsAggregator, accessL
 
         if (
           pathname.startsWith("/admin/") &&
-          !requireAdmin(req, res, config)
+          !(await requireAdmin(req, res, config))
         )
           return;
 
         if (req.method === "POST" && (pathname === "/credentials" || pathname === "/credentials/issue")) {
-          if (!requireAuth(req, res, config, ['credentials:write'])) return;
+          if (!await requireAuth(req, res, config, ['credentials:write'])) return;
           if (validateContentType(req, res)) return;
           const body = await readJson(req, config);
           if (body.__payloadTooLarge)
             return sendJson(res, 413, { code: "PAYLOAD_TOO_LARGE", message: "Request body exceeds the size limit." });
-          if (!body.id)
-            return sendJson(res, 400, { code: "INVALID_REQUEST", message: "Request body must include a credential id." });
+          const validated = validateRequest(res, schemas.issueCredential, { body });
+          if (!validated.ok) return;
+          const credential = validated.data.body;
           try {
-            const updated = await createAndPersistCredential(config, body);
-            await appendAuditLog(config, { action: "issue_credential", credentialId: body.id });
-            webhookService.trigger("credential.issued", body).catch(() => {});
-            return sendJson(res, 201, body);
+            await createAndPersistCredential(config, credential);
+            await appendAuditLog(config, { action: "issue_credential", credentialId: credential.id });
+            webhookService.trigger("credential.issued", credential).catch(() => {});
+            return sendJson(res, 201, credential);
           } catch (err) {
             if (err instanceof DuplicateCredentialError) {
               return sendJson(res, 409, {
@@ -360,8 +372,11 @@ export function createApp({ config, soroban, metrics, metricsAggregator, accessL
         // Credential revocation: DELETE /credentials/:id/revoke or POST /credentials/:id/revoke or DELETE /credentials/:id
         const revokeMatch = pathname.match(/^\/credentials\/([^/]+)(\/revoke)?$/);
         if ((req.method === "DELETE" || (req.method === "POST" && pathname.endsWith("/revoke"))) && revokeMatch) {
-          if (!requireAuth(req, res, config, ['credentials:write'])) return;
+          if (!await requireAuth(req, res, config, ['credentials:write'])) return;
           const credentialId = decodeURIComponent(revokeMatch[1]);
+          if (!validateRequest(res, schemas.credentialByIdParams, { params: { credentialId } }).ok) {
+            return;
+          }
           const revoked = await revokeAndPersistCredential(config, credentialId);
           if (!revoked) return notFound(res);
           await appendAuditLog(config, { action: "revoke_credential", credentialId });
@@ -371,39 +386,56 @@ export function createApp({ config, soroban, metrics, metricsAggregator, accessL
 
         // ── Webhook Endpoints ──────────────────────────────────────────
         if (req.method === "GET" && pathname === "/webhooks") {
-          if (!requireAuth(req, res, config, ['admin:read'])) return;
+          if (!await requireAuth(req, res, config, ['admin:read'])) return;
           const webhooks = await readWebhooks(config);
           return sendJson(res, 200, { webhooks });
         }
 
         if (req.method === "POST" && pathname === "/webhooks") {
-          if (!requireAuth(req, res, config, ['admin:write'])) return;
+          if (!await requireAuth(req, res, config, ['admin:write'])) return;
           if (validateContentType(req, res)) return;
           const body = await readJson(req, config);
           if (body.__payloadTooLarge)
             return sendJson(res, 413, { code: "PAYLOAD_TOO_LARGE", message: "Request body exceeds the size limit." });
-          if (!body.url)
-            return sendJson(res, 400, { code: "INVALID_REQUEST", message: "Webhook url is required." });
-          try {
-            new URL(body.url);
-          } catch {
-            return sendJson(res, 400, { code: "INVALID_REQUEST", message: "Invalid webhook url." });
-          }
-          const webhook = await createWebhookRecord(config, body);
+          const validated = validateRequest(res, schemas.createWebhook, { body });
+          if (!validated.ok) return;
+          const webhook = await createWebhookRecord(config, validated.data.body);
           return sendJson(res, 201, webhook);
         }
 
         if (req.method === "GET" && pathname === "/webhooks/logs") {
-          if (!requireAuth(req, res, config, ['admin:read'])) return;
-          const limit = Number.parseInt(url.searchParams.get("limit") ?? "50", 10) || 50;
-          const webhookId = url.searchParams.get("webhookId");
+          if (!await requireAuth(req, res, config, ['admin:read'])) return;
+          const validated = validateRequest(res, schemas.webhookLogsQuery, { query: url.searchParams });
+          if (!validated.ok) return;
+          const limit = validated.data.query.limit ?? 50;
+          const webhookId = validated.data.query.webhookId ?? null;
           const logs = await readWebhookLogs(config, { webhookId, limit });
           return sendJson(res, 200, { logs });
         }
 
+        if (req.method === "GET" && pathname === "/notifications/logs") {
+          if (!requireAuth(req, res, config, ['admin:read'])) return;
+          const limit = Number.parseInt(url.searchParams.get("limit") ?? "50", 10) || 50;
+          if (limit > 200) {
+            return sendJson(res, 400, { code: "INVALID_REQUEST", message: "limit must not exceed 200" });
+          }
+          const logs = await readNotificationLog(config, {
+            limit,
+            credentialId: url.searchParams.get("credentialId") ?? undefined,
+            status: url.searchParams.get("status") ?? undefined,
+          });
+          return sendJson(res, 200, { logs });
+        }
+
+        if (req.method === "GET" && pathname === "/notifications/summary") {
+          if (!requireAuth(req, res, config, ['admin:read'])) return;
+          const summary = await summarizeNotificationLog(config);
+          return sendJson(res, 200, summary);
+        }
+
         const webhookTestMatch = pathname.match(/^\/webhooks\/([^/]+)\/test$/);
         if (req.method === "POST" && (webhookTestMatch || pathname === "/webhooks/test")) {
-          if (!requireAuth(req, res, config, ['admin:write'])) return;
+          if (!await requireAuth(req, res, config, ['admin:write'])) return;
           let webhook;
           if (webhookTestMatch) {
             const id = decodeURIComponent(webhookTestMatch[1]);
@@ -412,12 +444,13 @@ export function createApp({ config, soroban, metrics, metricsAggregator, accessL
           } else {
             if (validateContentType(req, res)) return;
             const body = await readJson(req, config);
-            if (!body.url) return sendJson(res, 400, { code: "INVALID_REQUEST", message: "Webhook url is required for test." });
+            const validated = validateRequest(res, schemas.testWebhook, { body });
+            if (!validated.ok) return;
             webhook = {
               id: "whk_test",
-              url: body.url,
-              secret: body.secret || "test-secret",
-              authToken: body.authToken,
+              url: validated.data.body.url,
+              secret: validated.data.body.secret || "test-secret",
+              authToken: validated.data.body.authToken,
             };
           }
           const testResult = await webhookService.deliverTest(webhook);
@@ -426,16 +459,18 @@ export function createApp({ config, soroban, metrics, metricsAggregator, accessL
 
         const webhookLogsMatch = pathname.match(/^\/webhooks\/([^/]+)\/logs$/);
         if (req.method === "GET" && webhookLogsMatch) {
-          if (!requireAuth(req, res, config, ['admin:read'])) return;
+          if (!await requireAuth(req, res, config, ['admin:read'])) return;
           const webhookId = decodeURIComponent(webhookLogsMatch[1]);
-          const limit = Number.parseInt(url.searchParams.get("limit") ?? "50", 10) || 50;
+          const validated = validateRequest(res, schemas.webhookLogsQuery, { query: url.searchParams });
+          if (!validated.ok) return;
+          const limit = validated.data.query.limit ?? 50;
           const logs = await readWebhookLogs(config, { webhookId, limit });
           return sendJson(res, 200, { logs });
         }
 
         const webhookIdMatch = pathname.match(/^\/webhooks\/([^/]+)$/);
         if (req.method === "GET" && webhookIdMatch && pathname !== "/webhooks/logs") {
-          if (!requireAuth(req, res, config, ['admin:read'])) return;
+          if (!await requireAuth(req, res, config, ['admin:read'])) return;
           const id = decodeURIComponent(webhookIdMatch[1]);
           const webhook = await getWebhookRecord(config, id);
           if (!webhook) return notFound(res);
@@ -443,7 +478,7 @@ export function createApp({ config, soroban, metrics, metricsAggregator, accessL
         }
 
         if (req.method === "DELETE" && webhookIdMatch) {
-          if (!requireAuth(req, res, config, ['admin:write'])) return;
+          if (!await requireAuth(req, res, config, ['admin:write'])) return;
           const id = decodeURIComponent(webhookIdMatch[1]);
           const deleted = await deleteWebhookRecord(config, id);
           if (!deleted) return notFound(res);
@@ -463,15 +498,16 @@ export function createApp({ config, soroban, metrics, metricsAggregator, accessL
           const body = await readJson(req, config);
           if (body.__payloadTooLarge)
             return sendJson(res, 413, { error: "payload_too_large" });
-          if (!body.issuer)
-            return sendJson(res, 400, { error: "issuer_required" });
-          await soroban.addIssuer(body.issuer);
+          const validated = validateRequest(res, schemas.addIssuer, { body });
+          if (!validated.ok) return;
+          const { issuer } = validated.data.body;
+          await soroban.addIssuer(issuer);
           await appendAuditLog(config, {
             action: "add_issuer",
             actor: req.headers["x-actor"] ?? config.adminActor,
-            issuer: body.issuer,
+            issuer,
           });
-          return sendJson(res, 201, { issuer: body.issuer });
+          return sendJson(res, 201, { issuer });
         }
 
         if (req.method === "DELETE" && pathname === "/admin/issuers") {
@@ -481,8 +517,27 @@ export function createApp({ config, soroban, metrics, metricsAggregator, accessL
           const body = await readJson(req, config);
           if (body.__payloadTooLarge)
             return sendJson(res, 413, { error: "payload_too_large" });
-          const issuer = body.issuer ?? url.searchParams.get("issuer");
-          if (!issuer) return sendJson(res, 400, { error: "issuer_required" });
+          const validated = validateRequest(res, schemas.removeIssuer, {
+            body,
+            query: url.searchParams,
+          });
+          if (!validated.ok) return;
+          const issuer = validated.data.body.issuer ?? validated.data.query.issuer;
+          if (!issuer) {
+            return sendJson(res, 400, {
+              error: "validation_failed",
+              code: "VALIDATION_FAILED",
+              message: "Request validation failed.",
+              errors: [
+                {
+                  field: "issuer",
+                  source: "body",
+                  message: "issuer is required in the request body or as a query parameter",
+                  code: "required",
+                },
+              ],
+            });
+          }
           await soroban.removeIssuer(issuer);
           await appendAuditLog(config, {
             action: "remove_issuer",
@@ -496,9 +551,11 @@ export function createApp({ config, soroban, metrics, metricsAggregator, accessL
           // Reading expiry reports requires admin:read scope
           if (!await requireAuth(req, res, config, ['admin:read'])) return;
           
-          const windowDays =
-            Number.parseInt(url.searchParams.get("windowDays") ?? "", 10) ||
-            config.expiryWarningDays;
+          const validated = validateRequest(res, schemas.expiryReportQuery, {
+            query: url.searchParams,
+          });
+          if (!validated.ok) return;
+          const windowDays = validated.data.query.windowDays ?? config.expiryWarningDays;
           const credentials = await readCredentials(config);
           const expiring = findExpiringCredentials(credentials, {
             windowDays,
@@ -508,8 +565,8 @@ export function createApp({ config, soroban, metrics, metricsAggregator, accessL
             res,
             200,
             paginate(expiring, {
-              page: url.searchParams.get("page"),
-              pageSize: url.searchParams.get("pageSize"),
+              page: validated.data.query.page ?? null,
+              pageSize: validated.data.query.pageSize ?? null,
             }),
           );
         }
@@ -529,17 +586,9 @@ export function createApp({ config, soroban, metrics, metricsAggregator, accessL
           if (body.__payloadTooLarge) {
             return sendJson(res, 413, { code: "PAYLOAD_TOO_LARGE", message: "Request body exceeds the size limit." });
           }
-          if (!Array.isArray(body.thresholds)) {
-            return sendJson(res, 400, { code: "INVALID_REQUEST", message: "thresholds must be an array of positive integers (days)." });
-          }
-          const validThresholds = body.thresholds
-            .map((n) => Number.parseInt(n, 10))
-            .filter((n) => Number.isFinite(n) && n > 0)
-            .sort((a, b) => b - a);
-
-          if (validThresholds.length === 0) {
-            return sendJson(res, 400, { code: "INVALID_REQUEST", message: "thresholds must contain at least one positive integer." });
-          }
+          const validated = validateRequest(res, schemas.expiryThresholds, { body });
+          if (!validated.ok) return;
+          const validThresholds = [...validated.data.body.thresholds].sort((a, b) => b - a);
 
           config.expiryReminderThresholds = validThresholds;
           await appendAuditLog(config, {
@@ -562,12 +611,15 @@ export function createApp({ config, soroban, metrics, metricsAggregator, accessL
             return sendJson(res, 413, { code: "PAYLOAD_TOO_LARGE", message: "Request body exceeds the size limit." });
           }
 
+          const validated = validateRequest(res, schemas.createApiKey, { body });
+          if (!validated.ok) return;
+          const keyInput = validated.data.body;
           const issued = await apiKeyService.issueKey({
-            name: body.name ?? "default",
-            owner: body.owner ?? (req.headers["x-actor"] || config.adminActor),
-            scopes: body.scopes ?? ["credentials:read"],
-            tier: body.tier ?? "free",
-            expiresInDays: body.expiresInDays ? Number(body.expiresInDays) : null,
+            name: keyInput.name ?? "default",
+            owner: keyInput.owner ?? (req.headers["x-actor"] || config.adminActor),
+            scopes: keyInput.scopes ?? ["credentials:read"],
+            tier: keyInput.tier ?? "free",
+            expiresInDays: keyInput.expiresInDays ?? null,
           });
 
           await appendAuditLog(config, {
@@ -615,8 +667,10 @@ export function createApp({ config, soroban, metrics, metricsAggregator, accessL
           if (!await requireAuth(req, res, config, ['admin:write'])) return;
           const id = decodeURIComponent(apiKeyRotateMatch[1]);
           const body = await readJson(req, config);
+          const validated = validateRequest(res, schemas.rotateApiKey, { body });
+          if (!validated.ok) return;
           const rotated = await apiKeyService.rotateKey(id, {
-            expiresInDays: body.expiresInDays ? Number(body.expiresInDays) : null,
+            expiresInDays: validated.data.body.expiresInDays ?? null,
           });
           if (!rotated) return notFound(res);
           await appendAuditLog(config, {
