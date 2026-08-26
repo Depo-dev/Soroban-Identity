@@ -101,6 +101,8 @@ export function loadConfig(env = process.env) {
       .split(",")
       .map((entry) => entry.trim())
       .filter(Boolean),
+    healthProbeTimeoutMs: parseInteger(env.HEALTH_PROBE_TIMEOUT_MS, 2000),
+    redisUrl: env.REDIS_URL ?? "",
     expiryWarningDays: parseInteger(env.EXPIRY_WARNING_DAYS, 7),
     expiryReminderThresholds: parseThresholds(
       env.EXPIRY_REMINDER_THRESHOLDS,
@@ -274,6 +276,8 @@ export function logDefaultValues(env = process.env) {
     { key: "DID_CACHE_TTL_MS", defaultVal: "60000" },
     { key: "REDIS_MAX_RETRIES", defaultVal: "5" },
     { key: "CACHE_FAILURE_THRESHOLD", defaultVal: "3" },
+    { key: "HEALTH_PROBE_TIMEOUT_MS", defaultVal: "2000" },
+    { key: "REDIS_URL", defaultVal: "'' (disabled)" },
     { key: "EXPIRY_CRON_SCHEDULE", defaultVal: "'' (interval mode)" },
     { key: "NOTIFICATION_WEBHOOK_URL", defaultVal: "''" },
     { key: "EMAIL_API_URL", defaultVal: "''" },

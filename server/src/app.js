@@ -12,6 +12,7 @@ import {
   readWebhooks,
   WebhookDeliveryService,
 } from "./webhooks.js";
+import { collectHealth, collectReadiness } from "./health.js";
 import { readNotificationLog, summarizeNotificationLog } from "./notification-log.js";
 import { createDataLoaders } from "./dataloader.js";
 import { executeGraphQL, renderGraphiQLPlayground } from "./graphql.js";
@@ -33,6 +34,7 @@ import {
   validateContentType,
 } from "./http-utils.js";
 import { schemas, validateRequest } from "./validation.js";
+import { routeLabel } from "./route-label.js";
 import { requestContextStore } from "./request-context.js";
 import { handleEventsRequest } from "./sse.js";
 import { logger } from "./logger.js";
@@ -62,6 +64,7 @@ export function createApp({
   // issued API keys instead of falling back to the single admin key.
   config.apiKeyService = apiKeyService;
 
+export function createApp({ config, soroban, metrics, metricsAggregator, redisClient = null, webhookService = new WebhookDeliveryService(config) }) {
   return async function app(req, res) {
     const url = new URL(
       req.url,
@@ -74,6 +77,23 @@ export function createApp({
 
     // Set API Version and Deprecation response headers
     setVersionHeaders(res, { version, isDeprecated, isExplicitUrlVersion });
+
+    // Instrument the request for the Prometheus HTTP metrics. `res.once`
+    // fires whether the handler returned a response, threw, or the client
+    // disconnected, so in-flight can never leak.
+    if (metrics?.observeHttpRequest) {
+      const startedAt = process.hrtime.bigint();
+      metrics.httpInFlight?.inc();
+      res.once("close", () => {
+        metrics.httpInFlight?.dec();
+        metrics.observeHttpRequest({
+          method: req.method,
+          route: routeLabel(pathname),
+          statusCode: res.statusCode,
+          durationSeconds: Number(process.hrtime.bigint() - startedAt) / 1e9,
+        });
+      });
+    }
 
     // Check if this is the metrics endpoint before setting X-Request-ID
     const isMetricsEndpoint = req.method === "GET" && pathname === "/metrics";
@@ -121,7 +141,7 @@ export function createApp({
     }
 
     // Rate limiting check (exempt /info, /health, /metrics)
-    const isExempt = ["/info", "/health", "/metrics"].includes(url.pathname);
+    const isExempt = ["/info", "/health", "/ready", "/live", "/metrics"].includes(url.pathname);
     if (!isExempt) {
       const rateResult = rateLimiter.consume(req);
       res.setHeader("X-RateLimit-Tier", rateResult.tier);
@@ -171,16 +191,50 @@ export function createApp({
         }
 
         if (req.method === "GET" && pathname === "/health") {
-          const contracts = await soroban.pingAllContracts();
-          const ok = Object.values(contracts).every(Boolean);
-          return sendJson(res, ok ? 200 : 503, {
-            status: ok ? "ok" : "degraded",
+          const health = await collectHealth({
+            config,
+            soroban,
+            redisClient,
+            version: SERVER_VERSION,
+          });
+
+          const contracts = health.dependencies.contracts?.contracts ?? {};
+          // 200 while the service can still answer requests; 503 only when a
+          // required dependency is down, so a partially-degraded deployment is
+          // not pulled out of a load balancer.
+          const statusCode = health.status === "unhealthy" ? 503 : 200;
+
+          return sendJson(res, statusCode, {
+            ...health,
+            // Retained for existing consumers of this endpoint.
             apiVersion: version,
             supportedVersions: SUPPORTED_VERSIONS,
             deprecatedVersions: DEPRECATED_VERSIONS,
             defaultVersion: DEFAULT_VERSION,
             contracts,
             circuitBreaker: soroban.circuitBreaker.toHealthInfo(),
+          });
+        }
+
+        if (req.method === "GET" && pathname === "/ready") {
+          const readiness = await collectReadiness({
+            config,
+            soroban,
+            redisClient,
+            version: SERVER_VERSION,
+          });
+          return sendJson(res, readiness.ready ? 200 : 503, readiness);
+        }
+
+        if (req.method === "GET" && pathname === "/live") {
+          // Liveness answers "is the process still running and able to respond"
+          // and must never probe a dependency: a dependency outage should not
+          // cause the orchestrator to restart an otherwise healthy process.
+          return sendJson(res, 200, {
+            status: "alive",
+            version: SERVER_VERSION,
+            uptimeSeconds: Math.floor(process.uptime()),
+            timestamp: new Date().toISOString(),
           });
         }
 
@@ -193,7 +247,19 @@ export function createApp({
             await metricsAggregator
               .refresh()
               .catch((error) => logger.error({ error: error.message, stack: error.stack }, 'Metrics refresh failed'));
-          return sendText(res, 200, metrics.renderPrometheus());
+
+          // Recompute the business gauges at scrape time so they reflect the
+          // credential store as it is now, not as it was at the last write.
+          if (metrics.updateBusinessMetrics) {
+            try {
+              metrics.updateBusinessMetrics(await readCredentials(config));
+            } catch (error) {
+              logger.error({ error: error.message }, 'Business metrics refresh failed');
+            }
+          }
+
+          const body = await metrics.renderPrometheus();
+          return sendText(res, 200, body, metrics.contentType ? { "content-type": metrics.contentType } : {});
         }
 
         // ── GraphQL Endpoint ─────────────────────────────────────────
@@ -310,16 +376,22 @@ export function createApp({
           }
           const credentials = await readCredentials(config);
           const credential = credentials.find((c) => c.id === credentialId);
+          const recordVerification = (result) =>
+            metrics?.observeCredentialVerification?.(result);
           if (!credential) {
+            recordVerification("not_found");
             return sendJson(res, 200, { verified: false, reason: "not_found" });
           }
           if (credential.revoked) {
+            recordVerification("revoked");
             return sendJson(res, 200, { verified: false, reason: "revoked" });
           }
           const now = Math.floor(Date.now() / 1000);
           if (credential.expiresAt > 0 && credential.expiresAt < now) {
+            recordVerification("expired");
             return sendJson(res, 200, { verified: false, reason: "expired" });
           }
+          recordVerification("verified");
           return sendJson(res, 200, { verified: true, credential });
         }
 
