@@ -28,6 +28,8 @@ The server configuration can be customized using the following environment varia
 | `AUDIT_LOG_RETENTION_DAYS` | Number of days to retain rotated audit logs. | `30` |
 | `CREDENTIAL_STORE_PATH` | Storage location for credential records. | `[DATA_DIR]/credentials.json` |
 | `EXPIRY_CONCURRENCY` | Maximum concurrent credential expiry notifications. Controls parallelism to prevent event loop blocking. | `8` |
+| `HEALTH_PROBE_TIMEOUT_MS` | Per-dependency timeout for health and readiness probes. | `2000` |
+| `REDIS_URL` | Redis connection URL. Unset means the cache dependency reports `disabled`. | unset |
 
 ## Metrics
 
@@ -99,56 +101,47 @@ version info.
 
 ## Request Validation
 
-Every mutating endpoint and every query-bearing endpoint is validated with a
-[Zod](https://zod.dev) schema before its handler runs. Schemas live in
-`src/validation.js` and are keyed by route.
+| Endpoint | Purpose | Codes |
+| --- | --- | --- |
+| `GET /health` | Full dependency report with version and uptime | `200` healthy or degraded, `503` unhealthy |
+| `GET /ready` | Kubernetes readiness probe | `200` ready, `503` not ready |
+| `GET /live` | Kubernetes liveness probe | always `200` while the process responds |
 
-### What is validated
+All three skip authentication and rate limiting.
 
-| Section | Notes |
-| --- | --- |
-| Body | JSON bodies are validated against a strict schema — unknown keys are rejected. |
-| Query parameters | Values are parsed and range-checked (for example `limit` must be 1-200). |
-| Path parameters | Credential identifiers are pattern-checked before any lookup. |
-| Headers | `x-request-id`, `x-user-tier`, `x-api-version` and `x-actor` are validated on every request. |
-
-### Sanitization
-
-All string inputs are sanitized before schema checks run: surrounding
-whitespace is trimmed and ASCII control characters (including NUL and the C1
-range) are stripped, from values *and* object keys. A value that is only
-padding therefore fails its schema rather than being silently accepted.
-
-### Custom validators
-
-| Validator | Accepts |
-| --- | --- |
-| `stellarAccount` | `G` followed by 55 base32 characters. |
-| `stellarContract` | `C` followed by 55 base32 characters. |
-| `did` | `did:stellar:<STELLAR_ACCOUNT>`. |
-| `credentialId` | 3-128 characters of `A-Z a-z 0-9 . _ : -` — no `/` or whitespace, so an id can never alter routing. |
-| `subject` | Either a Stellar account address or a `did:stellar` DID. |
-| `httpUrl` | An absolute `http:` or `https:` URL. |
-
-### Error responses
-
-A failed request returns `400` with one entry per offending field:
+`/health` probes storage, RPC, contracts, and Redis in parallel, each with its
+own `HEALTH_PROBE_TIMEOUT_MS` budget, and reports per-dependency status, latency,
+and error message:
 
 ```json
 {
-  "error": "validation_failed",
-  "code": "VALIDATION_FAILED",
-  "message": "Request validation failed.",
-  "errors": [
-    { "field": "id", "source": "body", "message": "Must be 3-128 characters using letters, digits, dot, underscore, colon or hyphen", "code": "custom" },
-    { "field": "limit", "source": "query", "message": "Must be between 1 and 200", "code": "custom" }
-  ]
+  "status": "degraded",
+  "version": "0.1.0",
+  "uptimeSeconds": 3742,
+  "startedAt": "2026-01-01T00:00:00.000Z",
+  "nodeVersion": "v20.11.0",
+  "dependencies": {
+    "storage":   { "status": "up",       "latencyMs": 2,  "dataDir": "data", "writable": true },
+    "rpc":       { "status": "up",       "latencyMs": 41, "rpcStatus": "healthy", "latestLedger": 51234 },
+    "contracts": { "status": "degraded", "latencyMs": 88, "reachable": 2, "total": 3 },
+    "redis":     { "status": "disabled", "latencyMs": 0,  "reason": "REDIS_URL is not configured" }
+  }
 }
 ```
 
-`source` is one of `body`, `query`, `params` or `headers`, so a client can map
-each error back to the part of the request that produced it. Errors from every
-section are collected in a single pass rather than reported one at a time.
+Dependency states are `up`, `degraded`, `down`, and `disabled`. A `disabled`
+dependency is one that is not configured, and never counts against overall
+health. Overall `status` is `unhealthy` if any dependency is `down`, `degraded`
+if any is `degraded`, otherwise `healthy`.
+
+`/health` returns `503` only when the overall status is `unhealthy`, so a
+partially degraded deployment is not pulled out of a load balancer.
+
+`/ready` gates on storage and RPC alone — the dependencies required to answer a
+request — and names what is failing. Unreachable contracts or a cold cache leave
+most endpoints serviceable, so they are reported by `/health` but do not block
+readiness. `/live` probes nothing at all, so a dependency outage never causes an
+orchestrator to restart an otherwise healthy process.
 
 ## API Key Scopes
 
