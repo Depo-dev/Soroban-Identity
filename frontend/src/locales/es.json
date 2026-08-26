@@ -9,7 +9,8 @@
   },
   "tabs": {
     "identity": "Identidad (DID)",
-    "credentials": "Credenciales"
+    "credentials": "Credenciales",
+    "label": "Secciones"
   },
   "wallet": {
     "connect": "Conectar Billetera",
@@ -73,5 +74,10 @@
     "expiresInHours_plural": "Expira en {{count}} horas",
     "expiresInMins": "Expira en {{count}} min",
     "expiresInMins_plural": "Expira en {{count}} mins"
+  },
+  "a11y": {
+    "skipToContent": "Saltar al contenido principal",
+    "switchLanguage": "Cambiar idioma",
+    "dismissNotification": "Descartar notificación"
   }
 }

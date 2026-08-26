@@ -9,7 +9,8 @@
   },
   "tabs": {
     "identity": "Identity (DID)",
-    "credentials": "Credentials"
+    "credentials": "Credentials",
+    "label": "Sections"
   },
   "wallet": {
     "connect": "Connect Wallet",
@@ -73,5 +74,10 @@
     "expiresInHours_plural": "Expires in {{count}} hours",
     "expiresInMins": "Expires in {{count}} min",
     "expiresInMins_plural": "Expires in {{count}} mins"
+  },
+  "a11y": {
+    "skipToContent": "Skip to main content",
+    "switchLanguage": "Switch language",
+    "dismissNotification": "Dismiss notification"
   }
 }

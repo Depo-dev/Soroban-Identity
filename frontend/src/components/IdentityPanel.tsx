@@ -471,7 +471,11 @@ export default function IdentityPanel() {
             </button>
           </div>
         )}
+        <label htmlFor="resolve-address" className="visually-hidden">
+          Stellar address to resolve
+        </label>
         <input
+          id="resolve-address"
           placeholder="Stellar address (G…)"
           value={resolveAddress}
           onChange={(e) => setResolveAddress(e.target.value)}
@@ -630,6 +634,7 @@ export default function IdentityPanel() {
                     <div style={{ flex: 1 }}>
                       <input
                         type="text"
+                        aria-label={`Metadata key ${idx + 1}`}
                         placeholder="Key"
                         value={entry.key}
                         onChange={(e) => {
@@ -648,6 +653,7 @@ export default function IdentityPanel() {
                     <div style={{ flex: 1 }}>
                       <input
                         type="text"
+                        aria-label={`Metadata value ${idx + 1}`}
                         placeholder="Value"
                         value={entry.value}
                         onChange={(e) => {
@@ -809,6 +815,7 @@ export default function IdentityPanel() {
                 <div key={idx} style={{ display: 'flex', gap: '0.5rem', marginBottom: '0.5rem', alignItems: 'center' }}>
                   <input
                     type="text"
+                    aria-label={`Metadata key ${idx + 1}`}
                     placeholder="Key"
                     value={entry.key}
                     onChange={(e) => {
@@ -821,6 +828,7 @@ export default function IdentityPanel() {
                   />
                   <input
                     type="text"
+                    aria-label={`Metadata value ${idx + 1}`}
                     placeholder="Value"
                     value={entry.value}
                     onChange={(e) => {
