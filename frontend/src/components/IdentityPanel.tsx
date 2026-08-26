@@ -1,5 +1,5 @@
 import { useState, useReducer, useEffect, useRef } from 'react';
-import { QRCodeSVG } from 'qrcode.react';
+import DidQrCode from './DidQrCode';
 import { StrKey } from '@stellar/stellar-sdk';
 import type { WalletState } from '../hooks/useWallet';
 import type { ReputationRecord } from '../../../sdk/src/reputation';
@@ -471,7 +471,11 @@ export default function IdentityPanel() {
             </button>
           </div>
         )}
+        <label htmlFor="resolve-address" className="visually-hidden">
+          Stellar address to resolve
+        </label>
         <input
+          id="resolve-address"
           placeholder="Stellar address (G…)"
           value={resolveAddress}
           onChange={(e) => setResolveAddress(e.target.value)}
@@ -539,10 +543,10 @@ export default function IdentityPanel() {
           <div style={{ marginTop: '0.75rem' }}>
             <button
               onClick={() => setShowQr((v) => !v)}
-              onKeyDown={(e) => { if (e.key === 'Escape') setShowQr(false); }}
+              aria-haspopup="dialog"
               aria-expanded={showQr}
             >
-              {showQr ? 'Hide QR Code' : 'Show QR Code'}
+              Show QR Code
             </button>
             <button
               onClick={handleExportDid}
@@ -567,9 +571,11 @@ export default function IdentityPanel() {
               </button>
             )}
             {showQr && (
-              <div style={{ marginTop: '0.75rem', display: 'inline-block', background: '#fff', padding: '0.5rem', borderRadius: '0.5rem' }}>
-                <QRCodeSVG value={`did:stellar:${resolvedAddress}`} size={180} level="M" />
-              </div>
+              <DidQrCode
+                address={resolvedAddress}
+                asModal
+                onClose={() => setShowQr(false)}
+              />
             )}
           </div>
         )}
@@ -630,6 +636,7 @@ export default function IdentityPanel() {
                     <div style={{ flex: 1 }}>
                       <input
                         type="text"
+                        aria-label={`Metadata key ${idx + 1}`}
                         placeholder="Key"
                         value={entry.key}
                         onChange={(e) => {
@@ -648,6 +655,7 @@ export default function IdentityPanel() {
                     <div style={{ flex: 1 }}>
                       <input
                         type="text"
+                        aria-label={`Metadata value ${idx + 1}`}
                         placeholder="Value"
                         value={entry.value}
                         onChange={(e) => {
@@ -809,6 +817,7 @@ export default function IdentityPanel() {
                 <div key={idx} style={{ display: 'flex', gap: '0.5rem', marginBottom: '0.5rem', alignItems: 'center' }}>
                   <input
                     type="text"
+                    aria-label={`Metadata key ${idx + 1}`}
                     placeholder="Key"
                     value={entry.key}
                     onChange={(e) => {
@@ -821,6 +830,7 @@ export default function IdentityPanel() {
                   />
                   <input
                     type="text"
+                    aria-label={`Metadata value ${idx + 1}`}
                     placeholder="Value"
                     value={entry.value}
                     onChange={(e) => {
