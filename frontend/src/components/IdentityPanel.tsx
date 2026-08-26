@@ -1,5 +1,5 @@
 import { useState, useReducer, useEffect, useRef } from 'react';
-import { QRCodeSVG } from 'qrcode.react';
+import DidQrCode from './DidQrCode';
 import { StrKey } from '@stellar/stellar-sdk';
 import type { WalletState } from '../hooks/useWallet';
 import type { ReputationRecord } from '../../../sdk/src/reputation';
@@ -539,10 +539,10 @@ export default function IdentityPanel() {
           <div style={{ marginTop: '0.75rem' }}>
             <button
               onClick={() => setShowQr((v) => !v)}
-              onKeyDown={(e) => { if (e.key === 'Escape') setShowQr(false); }}
+              aria-haspopup="dialog"
               aria-expanded={showQr}
             >
-              {showQr ? 'Hide QR Code' : 'Show QR Code'}
+              Show QR Code
             </button>
             <button
               onClick={handleExportDid}
@@ -567,9 +567,11 @@ export default function IdentityPanel() {
               </button>
             )}
             {showQr && (
-              <div style={{ marginTop: '0.75rem', display: 'inline-block', background: '#fff', padding: '0.5rem', borderRadius: '0.5rem' }}>
-                <QRCodeSVG value={`did:stellar:${resolvedAddress}`} size={180} level="M" />
-              </div>
+              <DidQrCode
+                address={resolvedAddress}
+                asModal
+                onClose={() => setShowQr(false)}
+              />
             )}
           </div>
         )}
