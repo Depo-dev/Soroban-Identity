@@ -5,7 +5,10 @@ import { ensureDataDir } from './storage.js';
 import { ExpiryNotificationJob } from './expiry.js';
 import { MetricsAggregator, MetricsService } from './metrics.js';
 import { SorobanClient } from './soroban.js';
+import { DidCache } from './did-cache.js';
 import { WebhookDeliveryService } from './webhooks.js';
+import { ApiKeyService } from './api-keys.js';
+import { WebSocketHub } from './websocket.js';
 import { logger } from './logger.js';
 import { RotatingFileSink } from './access-log.js';
 
@@ -31,7 +34,17 @@ logDefaultValues();
 const config = loadConfig();
 await ensureDataDir(config);
 const metrics = new MetricsService();
-const soroban = new SorobanClient(config, metrics);
+const didCache = new DidCache(config, { metrics });
+// Connecting never throws: a cache outage must not stop the server booting.
+await didCache.connect();
+const soroban = new SorobanClient(config, metrics, { didCache });
+
+if (config.didCacheWarmList.length > 0) {
+  // Warm in the background so startup is not blocked on RPC round trips.
+  void didCache
+    .warm(config.didCacheWarmList, (did) => soroban.resolveDid(did))
+    .catch((error) => logger.error({ error: error.message }, 'DID cache warm failed'));
+}
 const webhookService = new WebhookDeliveryService(config);
 const metricsAggregator = new MetricsAggregator(soroban, metrics, { startLedger: Number.parseInt(process.env.METRICS_START_LEDGER ?? '0', 10) });
 const expiryJob = new ExpiryNotificationJob(config, soroban);
@@ -92,6 +105,7 @@ function shutdown(signal) {
   server.close(async () => {
     clearTimeout(timer);
     try {
+      if (realtime) await realtime.close();
       webhookService.drain();
       await soroban.drain();
       if (accessLogSink) await accessLogSink.close();

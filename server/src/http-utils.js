@@ -239,15 +239,26 @@ export function requireAdmin(req, res, config) {
 }
 
 /**
- * Determine the allowed origin for CORS based on the request origin
- * and the configured allowed origins list.
+ * Determine the value for Access-Control-Allow-Origin.
+ *
+ * Returns `null` when the request must not receive CORS headers at all —
+ * either nothing is allowed, or the request's origin is not on the list.
+ *
+ * @param {string|undefined} requestOrigin  - The request's Origin header
+ * @param {string[]} allowedOrigins         - config.corsAllowedOrigins
+ * @param {boolean} [credentials=false]     - config.corsCredentials
+ * @returns {string|null}
  */
-export function getAllowedOrigin(requestOrigin, allowedOrigins) {
+export function getAllowedOrigin(requestOrigin, allowedOrigins, credentials = false) {
   if (!allowedOrigins || allowedOrigins.length === 0) {
     return null;
   }
   if (allowedOrigins.includes("*")) {
-    return "*";
+    // With credentials enabled a wildcard is rejected by every browser, so the
+    // request's own origin is reflected instead. Without credentials the
+    // wildcard is returned as-is so responses stay cacheable across origins.
+    if (!credentials) return "*";
+    return requestOrigin ?? null;
   }
   if (requestOrigin && allowedOrigins.includes(requestOrigin)) {
     return requestOrigin;
@@ -256,39 +267,73 @@ export function getAllowedOrigin(requestOrigin, allowedOrigins) {
 }
 
 /**
- * Set CORS headers on the response.
- * Handles preflight OPTIONS requests and actual requests.
+ * Set CORS headers on the response and detect preflight requests.
+ *
+ * Every value is driven by configuration: allowed origins, whether credentials
+ * are permitted, the allowed methods and request headers, the headers exposed
+ * to the client, and how long a browser may cache the preflight result.
+ *
+ * @param {import('node:http').IncomingMessage} req
+ * @param {import('node:http').ServerResponse} res
+ * @param {object} config
+ * @returns {boolean} True when this is a preflight the caller should answer
+ *   with 204.
  */
 export function setCorsHeaders(req, res, config) {
   const requestOrigin = req.headers.origin;
+  const credentials = config.corsCredentials === true;
   const allowedOrigin = getAllowedOrigin(
     requestOrigin,
     config.corsAllowedOrigins,
+    credentials,
   );
 
   if (allowedOrigin) {
     res.setHeader("Access-Control-Allow-Origin", allowedOrigin);
     // Per the CORS spec, credentials cannot be used with a wildcard origin.
     // Only send the header when a specific (non-wildcard) origin is reflected.
-    if (allowedOrigin !== "*") {
+    if (credentials && allowedOrigin !== "*") {
       res.setHeader("Access-Control-Allow-Credentials", "true");
     }
   }
 
-  // Add to Access-Control-Expose-Headers
-  res.setHeader("Access-Control-Expose-Headers", "X-Request-ID, Content-Type");
+  // Any response whose Allow-Origin depends on the request's Origin must not
+  // be served from a shared cache to a different origin.
+  if (!config.corsAllowedOrigins?.includes("*") || credentials) {
+    res.setHeader("Vary", "Origin");
+  }
+
+  const exposedHeaders = config.corsExposedHeaders ?? [
+    "X-Request-ID",
+    "Content-Type",
+  ];
+  if (exposedHeaders.length > 0) {
+    res.setHeader("Access-Control-Expose-Headers", exposedHeaders.join(", "));
+  }
 
   // Handle preflight OPTIONS
   if (req.method === "OPTIONS") {
+    const methods = config.corsMethods ?? [
+      "GET",
+      "POST",
+      "PUT",
+      "PATCH",
+      "DELETE",
+      "OPTIONS",
+    ];
+    const allowedHeaders = config.corsAllowedHeaders ?? [
+      "Content-Type",
+      "Authorization",
+      "X-API-Key",
+      "X-Request-ID",
+      "X-Actor",
+    ];
+    res.setHeader("Access-Control-Allow-Methods", methods.join(", "));
+    res.setHeader("Access-Control-Allow-Headers", allowedHeaders.join(", "));
     res.setHeader(
-      "Access-Control-Allow-Methods",
-      "GET, POST, PUT, DELETE, PATCH, OPTIONS",
+      "Access-Control-Max-Age",
+      String(config.corsMaxAge ?? 86400),
     );
-    res.setHeader(
-      "Access-Control-Allow-Headers",
-      "Content-Type, Authorization, X-API-Key, X-Request-ID, X-Actor",
-    );
-    res.setHeader("Access-Control-Max-Age", "86400");
     return true; // Handled, respond with 204
   }
 
