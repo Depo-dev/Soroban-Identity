@@ -91,6 +91,16 @@ export function loadConfig(env = process.env) {
     credentialStorePath: env.CREDENTIAL_STORE_PATH
       ? path.resolve(env.CREDENTIAL_STORE_PATH)
       : path.join(DEFAULT_DATA_DIR, "credentials.json"),
+    redisUrl: env.REDIS_URL ?? "",
+    didCacheTtlMs: parseInteger(env.DID_CACHE_TTL_MS, 60 * 1000),
+    redisMaxRetries: parseInteger(env.REDIS_MAX_RETRIES, 5),
+    redisRetryBaseMs: parseInteger(env.REDIS_RETRY_BASE_MS, 200),
+    redisCommandTimeoutMs: parseInteger(env.REDIS_COMMAND_TIMEOUT_MS, 1000),
+    cacheFailureThreshold: parseInteger(env.CACHE_FAILURE_THRESHOLD, 3),
+    didCacheWarmList: (env.DID_CACHE_WARM_LIST ?? "")
+      .split(",")
+      .map((entry) => entry.trim())
+      .filter(Boolean),
     healthProbeTimeoutMs: parseInteger(env.HEALTH_PROBE_TIMEOUT_MS, 2000),
     redisUrl: env.REDIS_URL ?? "",
     expiryWarningDays: parseInteger(env.EXPIRY_WARNING_DAYS, 7),
@@ -192,6 +202,11 @@ export function validateConfig(env = process.env) {
     { key: "HEALTH_PROBE_TIMEOUT_MS", desc: "must be a valid integer" },
     { key: "NOTIFICATION_MAX_RETRIES", desc: "must be a valid integer" },
     { key: "NOTIFICATION_RETRY_BASE_MS", desc: "must be a valid integer" },
+    { key: "DID_CACHE_TTL_MS", desc: "must be a valid integer" },
+    { key: "REDIS_MAX_RETRIES", desc: "must be a valid integer" },
+    { key: "REDIS_RETRY_BASE_MS", desc: "must be a valid integer" },
+    { key: "REDIS_COMMAND_TIMEOUT_MS", desc: "must be a valid integer" },
+    { key: "CACHE_FAILURE_THRESHOLD", desc: "must be a valid integer" },
   ];
 
   for (const item of numericVars) {
@@ -209,6 +224,18 @@ export function validateConfig(env = process.env) {
       new URL(rpcUrl);
     } catch {
       invalid.push("STELLAR_RPC_URL: must be a valid URL");
+    }
+  }
+
+  const redisUrl = env.REDIS_URL;
+  if (redisUrl !== undefined && redisUrl !== "") {
+    try {
+      const parsed = new URL(redisUrl);
+      if (parsed.protocol !== "redis:" && parsed.protocol !== "rediss:") {
+        invalid.push("REDIS_URL: must use the redis:// or rediss:// scheme");
+      }
+    } catch {
+      invalid.push("REDIS_URL: must be a valid URL");
     }
   }
 
@@ -258,6 +285,10 @@ export function logDefaultValues(env = process.env) {
     { key: "EXPIRY_WARNING_DAYS", defaultVal: "7" },
     { key: "EXPIRY_JOB_INTERVAL_MS", defaultVal: "3600000" },
     { key: "EXPIRY_CONCURRENCY", defaultVal: "8" },
+    { key: "REDIS_URL", defaultVal: "'' (cache disabled)" },
+    { key: "DID_CACHE_TTL_MS", defaultVal: "60000" },
+    { key: "REDIS_MAX_RETRIES", defaultVal: "5" },
+    { key: "CACHE_FAILURE_THRESHOLD", defaultVal: "3" },
     { key: "HEALTH_PROBE_TIMEOUT_MS", defaultVal: "2000" },
     { key: "REDIS_URL", defaultVal: "'' (disabled)" },
     { key: "EXPIRY_CRON_SCHEDULE", defaultVal: "'' (interval mode)" },

@@ -181,50 +181,68 @@ credential expires.
 
 By default the job runs on a fixed interval (`EXPIRY_JOB_INTERVAL_MS`). Setting
 `EXPIRY_CRON_SCHEDULE` switches it to a cron schedule instead:
+| `REDIS_URL` | Redis connection URL (`redis://` or `rediss://`). Unset disables the DID cache. | unset |
+| `DID_CACHE_TTL_MS` | TTL applied to cached DID documents. | `60000` |
+| `REDIS_MAX_RETRIES` | Connection attempts before the cache is left unavailable. | `5` |
+| `REDIS_RETRY_BASE_MS` | Base delay for connection backoff. | `200` |
+| `REDIS_COMMAND_TIMEOUT_MS` | Per-command timeout. | `1000` |
+| `CACHE_FAILURE_THRESHOLD` | Consecutive failures before the cache is bypassed. | `3` |
+| `DID_CACHE_WARM_LIST` | Comma-separated DIDs or addresses to pre-resolve at startup. | unset |
 
-## Health and Readiness
+## DID Resolution Cache
 
-| Endpoint | Purpose | Codes |
+`SorobanClient.resolveDid()` reads through a Redis cache when `REDIS_URL` is
+set, cutting repeat resolutions of the same DID down to one Redis round trip
+instead of an RPC call.
+
+### Graceful degradation
+
+The cache is never on the critical path. A miss, a Redis error, a command
+timeout, or a completely unreachable Redis all fall through to the contract, so
+resolution still succeeds — just slower. Specifically:
+
+- A failed connection at startup logs and continues; the server boots uncached.
+- After `CACHE_FAILURE_THRESHOLD` consecutive failures the cache is bypassed
+  entirely and a reconnect runs in the background, so requests stop paying the
+  Redis timeout on every call. A successful reconnect closes the breaker.
+- A corrupt cache entry is treated as a miss and deleted, rather than being
+  left to poison every later read of that DID.
+- Only real documents are cached. A negative result is never stored, so a DID
+  created moments later is not invisible for the whole TTL.
+
+### Keys and invalidation
+
+`did:stellar:G...` and a bare `G...` normalise to the same key
+(`did:doc:<address>`), so the two forms cannot drift apart on invalidation.
+
+`SorobanClient.invalidateDid()` drops one entry — call it after any write that
+changes a document. Two admin endpoints expose this operationally:
+
+| Endpoint | Scope | Description |
 | --- | --- | --- |
-| `GET /health` | Full dependency report with version and uptime | `200` healthy or degraded, `503` unhealthy |
-| `GET /ready` | Kubernetes readiness probe | `200` ready, `503` not ready |
-| `GET /live` | Kubernetes liveness probe | always `200` while the process responds |
+| `GET /cache/stats` | `admin:read` | Hits, misses, errors, invalidations, and hit rate |
+| `DELETE /cache/dids` | `admin:write` | Flush every cached DID (SCAN-based, never `KEYS`) |
+| `DELETE /cache/dids/:did` | `admin:write` | Invalidate one DID |
 
-All three skip authentication and rate limiting.
+### Metrics
 
-`/health` probes storage, RPC, contracts, and Redis in parallel, each with its
-own `HEALTH_PROBE_TIMEOUT_MS` budget, and reports per-dependency status, latency,
-and error message:
+`did_cache_hits_total`, `did_cache_misses_total`, `did_cache_sets_total`,
+`did_cache_errors_total`, and `did_cache_invalidations_total` are exported on
+`/metrics` alongside the existing counters.
 
-```json
-{
-  "status": "degraded",
-  "version": "0.1.0",
-  "uptimeSeconds": 3742,
-  "startedAt": "2026-01-01T00:00:00.000Z",
-  "nodeVersion": "v20.11.0",
-  "dependencies": {
-    "storage":   { "status": "up",       "latencyMs": 2,  "dataDir": "data", "writable": true },
-    "rpc":       { "status": "up",       "latencyMs": 41, "rpcStatus": "healthy", "latestLedger": 51234 },
-    "contracts": { "status": "degraded", "latencyMs": 88, "reachable": 2, "total": 3 },
-    "redis":     { "status": "disabled", "latencyMs": 0,  "reason": "REDIS_URL is not configured" }
-  }
-}
-```
+### Warming
 
-Dependency states are `up`, `degraded`, `down`, and `disabled`. A `disabled`
-dependency is one that is not configured, and never counts against overall
-health. Overall `status` is `unhealthy` if any dependency is `down`, `degraded`
-if any is `degraded`, otherwise `healthy`.
+`DID_CACHE_WARM_LIST` pre-resolves a comma-separated set of DIDs at startup.
+Warming runs in the background so boot is not blocked on RPC round trips, and
+one failing DID does not abort the rest.
 
-`/health` returns `503` only when the overall status is `unhealthy`, so a
-partially degraded deployment is not pulled out of a load balancer.
+### Redis client
 
-`/ready` gates on storage and RPC alone — the dependencies required to answer a
-request — and names what is failing. Unreachable contracts or a cold cache leave
-most endpoints serviceable, so they are reported by `/health` but do not block
-readiness. `/live` probes nothing at all, so a dependency outage never causes an
-orchestrator to restart an otherwise healthy process.
+The client is implemented directly against `node:net`/`node:tls` in
+`src/redis-client.js`, because this server ships with pino as its only runtime
+dependency. It speaks RESP, supports `redis://` and `rediss://` with optional
+auth and database selection, and covers GET, SET with TTL, DEL, SCAN, and PING
+with connection retry and per-command timeouts.
 
 ## API Key Scopes
 

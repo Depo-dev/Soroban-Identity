@@ -2,8 +2,8 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import { MetricsService } from '../src/metrics.js';
 
-test('metrics service renders Prometheus counters and latency histogram', () => {
-  const metrics = new MetricsService();
+test('metrics service renders Prometheus counters and latency histogram', async () => {
+  const metrics = new MetricsService({ collectDefaultMetrics: false });
   metrics.applyEvents([
     { topic: ['DID', 'created'] },
     { topic: ['CRED', 'issued credential'] },
@@ -11,7 +11,7 @@ test('metrics service renders Prometheus counters and latency histogram', () => 
     { topic: ['SCORE', 'submitted'] },
   ]);
   metrics.observeRpcLatency(0.2);
-  const rendered = metrics.renderPrometheus();
+  const rendered = await metrics.renderPrometheus();
 
   // Verify counters are present
   assert.match(rendered, /dids_created_total 1/);
@@ -37,8 +37,8 @@ test('metrics service renders Prometheus counters and latency histogram', () => 
   assert.match(rendered, /soroban_rpc_call_latency_seconds_count 1/);
 });
 
-test('metrics service increments exactly one counter per event, even when other fields contain unrelated keywords (#507)', () => {
-  const metrics = new MetricsService();
+test('metrics service increments exactly one counter per event, even when other fields contain unrelated keywords (#507)', async () => {
+  const metrics = new MetricsService({ collectDefaultMetrics: false });
   metrics.applyEvents([
     {
       topic: ['CRED', 'issued credential'],
@@ -48,7 +48,7 @@ test('metrics service increments exactly one counter per event, even when other 
       note: 'this credential was later revoked, a DID was created, and a score was submitted',
     },
   ]);
-  const rendered = metrics.renderPrometheus();
+  const rendered = await metrics.renderPrometheus();
 
   assert.match(rendered, /credentials_issued_total 1/);
   assert.match(rendered, /credentials_revoked_total 0/);
@@ -78,7 +78,7 @@ test('#488 regression: concurrent refresh calls share one in-flight promise and 
   };
 
   const { MetricsAggregator } = await import('../src/metrics.js');
-  const metrics = new (await import('../src/metrics.js')).MetricsService();
+  const metrics = new (await import('../src/metrics.js')).MetricsService({ collectDefaultMetrics: false });
   const aggregator = new MetricsAggregator(soroban, metrics, { startLedger: 0 });
 
   // Fire two concurrent refreshes — they should coalesce into a single fetch.
@@ -90,7 +90,7 @@ test('#488 regression: concurrent refresh calls share one in-flight promise and 
   assert.equal(r2, 1, 'second refresh (shared promise) should also report 1 event processed');
 
   // The counter must be incremented exactly once.
-  const rendered = metrics.renderPrometheus();
+  const rendered = await metrics.renderPrometheus();
   assert.match(rendered, /credentials_issued_total 1/,
     'credentials_issued_total should be 1, not 2 (no double-counting)');
 });
