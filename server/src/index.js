@@ -6,6 +6,8 @@ import { ExpiryNotificationJob } from './expiry.js';
 import { MetricsAggregator, MetricsService } from './metrics.js';
 import { SorobanClient } from './soroban.js';
 import { WebhookDeliveryService } from './webhooks.js';
+import { ApiKeyService } from './api-keys.js';
+import { WebSocketHub } from './websocket.js';
 import { logger } from './logger.js';
 
 const validationResult = validateConfig();
@@ -37,7 +39,27 @@ const expiryJob = new ExpiryNotificationJob(config, soroban);
 
 if (process.env.DISABLE_EXPIRY_JOB !== 'true') expiryJob.start();
 
-const server = http.createServer(createApp({ config, soroban, metrics, metricsAggregator, webhookService }));
+const apiKeyService = new ApiKeyService(config);
+
+// The hub is created before the app so credential and DID changes can be
+// pushed to subscribers from the same handlers that fire webhooks.
+const realtime = config.wsEnabled
+  ? new WebSocketHub({
+      config,
+      soroban,
+      apiKeyService,
+      heartbeatIntervalMs: config.wsHeartbeatIntervalMs,
+    })
+  : null;
+
+const server = http.createServer(
+  createApp({ config, soroban, metrics, metricsAggregator, webhookService, apiKeyService, realtime }),
+);
+
+if (realtime) {
+  realtime.attach(server);
+  logger.info({ path: config.wsPath }, 'WebSocket endpoint enabled');
+}
 
 
 const connections = new Set();
@@ -76,6 +98,7 @@ function shutdown(signal) {
   server.close(async () => {
     clearTimeout(timer);
     try {
+      if (realtime) await realtime.close();
       webhookService.drain();
       await soroban.drain();
     } catch (error) {

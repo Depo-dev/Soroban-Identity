@@ -55,6 +55,7 @@ export function createApp({
   webhookService = new WebhookDeliveryService(config),
   apiKeyService = new ApiKeyService(config),
   rateLimiter = new TieredRateLimiter(),
+  realtime = null,
 }) {
   // Expose the key service on config so http-utils.requireAuth can validate
   // issued API keys instead of falling back to the single admin key.
@@ -356,6 +357,7 @@ export function createApp({
             await createAndPersistCredential(config, credential);
             await appendAuditLog(config, { action: "issue_credential", credentialId: credential.id });
             webhookService.trigger("credential.issued", credential).catch(() => {});
+            realtime?.emitCredentialEvent("issued", credential);
             return sendJson(res, 201, credential);
           } catch (err) {
             if (err instanceof DuplicateCredentialError) {
@@ -381,6 +383,7 @@ export function createApp({
           if (!revoked) return notFound(res);
           await appendAuditLog(config, { action: "revoke_credential", credentialId });
           webhookService.trigger("credential.revoked", { id: credentialId, revokedAt: revoked.revokedAt }).catch(() => {});
+          realtime?.emitCredentialEvent("revoked", revoked);
           return sendJson(res, 200, { revoked: true, credential: revoked });
         }
 
@@ -482,6 +485,7 @@ export function createApp({
           if (!validated.ok) return;
           const { issuer } = validated.data.body;
           await soroban.addIssuer(issuer);
+          realtime?.emitDidEvent("issuer_added", issuer, { subject: issuer });
           await appendAuditLog(config, {
             action: "add_issuer",
             actor: req.headers["x-actor"] ?? config.adminActor,
@@ -519,6 +523,7 @@ export function createApp({
             });
           }
           await soroban.removeIssuer(issuer);
+          realtime?.emitDidEvent("issuer_removed", issuer, { subject: issuer });
           await appendAuditLog(config, {
             action: "remove_issuer",
             actor: req.headers["x-actor"] ?? config.adminActor,
