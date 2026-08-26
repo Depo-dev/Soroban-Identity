@@ -29,6 +29,59 @@ The server configuration can be customized using the following environment varia
 | `CREDENTIAL_STORE_PATH` | Storage location for credential records. | `[DATA_DIR]/credentials.json` |
 | `EXPIRY_CONCURRENCY` | Maximum concurrent credential expiry notifications. Controls parallelism to prevent event loop blocking. | `8` |
 
+## Request Validation
+
+Every mutating endpoint and every query-bearing endpoint is validated with a
+[Zod](https://zod.dev) schema before its handler runs. Schemas live in
+`src/validation.js` and are keyed by route.
+
+### What is validated
+
+| Section | Notes |
+| --- | --- |
+| Body | JSON bodies are validated against a strict schema — unknown keys are rejected. |
+| Query parameters | Values are parsed and range-checked (for example `limit` must be 1-200). |
+| Path parameters | Credential identifiers are pattern-checked before any lookup. |
+| Headers | `x-request-id`, `x-user-tier`, `x-api-version` and `x-actor` are validated on every request. |
+
+### Sanitization
+
+All string inputs are sanitized before schema checks run: surrounding
+whitespace is trimmed and ASCII control characters (including NUL and the C1
+range) are stripped, from values *and* object keys. A value that is only
+padding therefore fails its schema rather than being silently accepted.
+
+### Custom validators
+
+| Validator | Accepts |
+| --- | --- |
+| `stellarAccount` | `G` followed by 55 base32 characters. |
+| `stellarContract` | `C` followed by 55 base32 characters. |
+| `did` | `did:stellar:<STELLAR_ACCOUNT>`. |
+| `credentialId` | 3-128 characters of `A-Z a-z 0-9 . _ : -` — no `/` or whitespace, so an id can never alter routing. |
+| `subject` | Either a Stellar account address or a `did:stellar` DID. |
+| `httpUrl` | An absolute `http:` or `https:` URL. |
+
+### Error responses
+
+A failed request returns `400` with one entry per offending field:
+
+```json
+{
+  "error": "validation_failed",
+  "code": "VALIDATION_FAILED",
+  "message": "Request validation failed.",
+  "errors": [
+    { "field": "id", "source": "body", "message": "Must be 3-128 characters using letters, digits, dot, underscore, colon or hyphen", "code": "custom" },
+    { "field": "limit", "source": "query", "message": "Must be between 1 and 200", "code": "custom" }
+  ]
+}
+```
+
+`source` is one of `body`, `query`, `params` or `headers`, so a client can map
+each error back to the part of the request that produced it. Errors from every
+section are collected in a single pass rather than reported one at a time.
+
 ## API Key Scopes
 
 The server supports granular access control through API key scopes. Instead of granting full access, you can issue scoped keys for specific operations.
