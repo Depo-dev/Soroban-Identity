@@ -32,6 +32,7 @@ import {
   validateContentType,
 } from "./http-utils.js";
 import { schemas, validateRequest } from "./validation.js";
+import { routeLabel } from "./route-label.js";
 import { requestContextStore } from "./request-context.js";
 import { handleEventsRequest } from "./sse.js";
 import { logger } from "./logger.js";
@@ -72,6 +73,23 @@ export function createApp({
 
     // Set API Version and Deprecation response headers
     setVersionHeaders(res, { version, isDeprecated, isExplicitUrlVersion });
+
+    // Instrument the request for the Prometheus HTTP metrics. `res.once`
+    // fires whether the handler returned a response, threw, or the client
+    // disconnected, so in-flight can never leak.
+    if (metrics?.observeHttpRequest) {
+      const startedAt = process.hrtime.bigint();
+      metrics.httpInFlight?.inc();
+      res.once("close", () => {
+        metrics.httpInFlight?.dec();
+        metrics.observeHttpRequest({
+          method: req.method,
+          route: routeLabel(pathname),
+          statusCode: res.statusCode,
+          durationSeconds: Number(process.hrtime.bigint() - startedAt) / 1e9,
+        });
+      });
+    }
 
     // Check if this is the metrics endpoint before setting X-Request-ID
     const isMetricsEndpoint = req.method === "GET" && pathname === "/metrics";
@@ -191,7 +209,19 @@ export function createApp({
             await metricsAggregator
               .refresh()
               .catch((error) => logger.error({ error: error.message, stack: error.stack }, 'Metrics refresh failed'));
-          return sendText(res, 200, metrics.renderPrometheus());
+
+          // Recompute the business gauges at scrape time so they reflect the
+          // credential store as it is now, not as it was at the last write.
+          if (metrics.updateBusinessMetrics) {
+            try {
+              metrics.updateBusinessMetrics(await readCredentials(config));
+            } catch (error) {
+              logger.error({ error: error.message }, 'Business metrics refresh failed');
+            }
+          }
+
+          const body = await metrics.renderPrometheus();
+          return sendText(res, 200, body, metrics.contentType ? { "content-type": metrics.contentType } : {});
         }
 
         // ── GraphQL Endpoint ─────────────────────────────────────────
@@ -308,16 +338,22 @@ export function createApp({
           }
           const credentials = await readCredentials(config);
           const credential = credentials.find((c) => c.id === credentialId);
+          const recordVerification = (result) =>
+            metrics?.observeCredentialVerification?.(result);
           if (!credential) {
+            recordVerification("not_found");
             return sendJson(res, 200, { verified: false, reason: "not_found" });
           }
           if (credential.revoked) {
+            recordVerification("revoked");
             return sendJson(res, 200, { verified: false, reason: "revoked" });
           }
           const now = Math.floor(Date.now() / 1000);
           if (credential.expiresAt > 0 && credential.expiresAt < now) {
+            recordVerification("expired");
             return sendJson(res, 200, { verified: false, reason: "expired" });
           }
+          recordVerification("verified");
           return sendJson(res, 200, { verified: true, credential });
         }
 
