@@ -46,8 +46,8 @@ const SERVER_FEATURES = [
   "api_versioning",
 ];
 
-export function createApp({ config, soroban, metrics, metricsAggregator, webhookService = new WebhookDeliveryService(config) }) {
-  return function app(req, res) {
+export function createApp({ config, soroban, metrics, metricsAggregator, didCache = null, webhookService = new WebhookDeliveryService(config) }) {
+  return async function app(req, res) {
     const url = new URL(
       req.url,
       `http://${req.headers.host ?? "localhost"}`,
@@ -168,7 +168,6 @@ export function createApp({ config, soroban, metrics, metricsAggregator, webhook
           return handleEventsRequest(req, res, url, { config, soroban });
         }
 
-        if (req.method === "GET" && url.pathname === "/metrics") {
         if (req.method === "GET" && pathname === "/metrics") {
           if (metricsAggregator)
             await metricsAggregator
@@ -388,6 +387,25 @@ export function createApp({ config, soroban, metrics, metricsAggregator, webhook
           const webhookId = url.searchParams.get("webhookId");
           const logs = await readWebhookLogs(config, { webhookId, limit });
           return sendJson(res, 200, { logs });
+        }
+
+        if (req.method === "GET" && pathname === "/cache/stats") {
+          if (!requireAuth(req, res, config, ['admin:read'])) return;
+          return sendJson(res, 200, didCache ? didCache.getStats() : { enabled: false });
+        }
+
+        if (req.method === "DELETE" && pathname === "/cache/dids") {
+          if (!requireAuth(req, res, config, ['admin:write'])) return;
+          const cleared = didCache ? await didCache.invalidateAll() : 0;
+          return sendJson(res, 200, { cleared });
+        }
+
+        const cacheDidMatch = pathname.match(/^\/cache\/dids\/([^/]+)$/);
+        if (req.method === "DELETE" && cacheDidMatch) {
+          if (!requireAuth(req, res, config, ['admin:write'])) return;
+          const did = decodeURIComponent(cacheDidMatch[1]);
+          const invalidated = didCache ? await didCache.invalidate(did) : false;
+          return sendJson(res, 200, { did, invalidated });
         }
 
         const webhookTestMatch = pathname.match(/^\/webhooks\/([^/]+)\/test$/);

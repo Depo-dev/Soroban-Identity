@@ -28,6 +28,68 @@ The server configuration can be customized using the following environment varia
 | `AUDIT_LOG_RETENTION_DAYS` | Number of days to retain rotated audit logs. | `30` |
 | `CREDENTIAL_STORE_PATH` | Storage location for credential records. | `[DATA_DIR]/credentials.json` |
 | `EXPIRY_CONCURRENCY` | Maximum concurrent credential expiry notifications. Controls parallelism to prevent event loop blocking. | `8` |
+| `REDIS_URL` | Redis connection URL (`redis://` or `rediss://`). Unset disables the DID cache. | unset |
+| `DID_CACHE_TTL_MS` | TTL applied to cached DID documents. | `60000` |
+| `REDIS_MAX_RETRIES` | Connection attempts before the cache is left unavailable. | `5` |
+| `REDIS_RETRY_BASE_MS` | Base delay for connection backoff. | `200` |
+| `REDIS_COMMAND_TIMEOUT_MS` | Per-command timeout. | `1000` |
+| `CACHE_FAILURE_THRESHOLD` | Consecutive failures before the cache is bypassed. | `3` |
+| `DID_CACHE_WARM_LIST` | Comma-separated DIDs or addresses to pre-resolve at startup. | unset |
+
+## DID Resolution Cache
+
+`SorobanClient.resolveDid()` reads through a Redis cache when `REDIS_URL` is
+set, cutting repeat resolutions of the same DID down to one Redis round trip
+instead of an RPC call.
+
+### Graceful degradation
+
+The cache is never on the critical path. A miss, a Redis error, a command
+timeout, or a completely unreachable Redis all fall through to the contract, so
+resolution still succeeds — just slower. Specifically:
+
+- A failed connection at startup logs and continues; the server boots uncached.
+- After `CACHE_FAILURE_THRESHOLD` consecutive failures the cache is bypassed
+  entirely and a reconnect runs in the background, so requests stop paying the
+  Redis timeout on every call. A successful reconnect closes the breaker.
+- A corrupt cache entry is treated as a miss and deleted, rather than being
+  left to poison every later read of that DID.
+- Only real documents are cached. A negative result is never stored, so a DID
+  created moments later is not invisible for the whole TTL.
+
+### Keys and invalidation
+
+`did:stellar:G...` and a bare `G...` normalise to the same key
+(`did:doc:<address>`), so the two forms cannot drift apart on invalidation.
+
+`SorobanClient.invalidateDid()` drops one entry — call it after any write that
+changes a document. Two admin endpoints expose this operationally:
+
+| Endpoint | Scope | Description |
+| --- | --- | --- |
+| `GET /cache/stats` | `admin:read` | Hits, misses, errors, invalidations, and hit rate |
+| `DELETE /cache/dids` | `admin:write` | Flush every cached DID (SCAN-based, never `KEYS`) |
+| `DELETE /cache/dids/:did` | `admin:write` | Invalidate one DID |
+
+### Metrics
+
+`did_cache_hits_total`, `did_cache_misses_total`, `did_cache_sets_total`,
+`did_cache_errors_total`, and `did_cache_invalidations_total` are exported on
+`/metrics` alongside the existing counters.
+
+### Warming
+
+`DID_CACHE_WARM_LIST` pre-resolves a comma-separated set of DIDs at startup.
+Warming runs in the background so boot is not blocked on RPC round trips, and
+one failing DID does not abort the rest.
+
+### Redis client
+
+The client is implemented directly against `node:net`/`node:tls` in
+`src/redis-client.js`, because this server ships with pino as its only runtime
+dependency. It speaks RESP, supports `redis://` and `rediss://` with optional
+auth and database selection, and covers GET, SET with TTL, DEL, SCAN, and PING
+with connection retry and per-command timeouts.
 
 ## API Key Scopes
 

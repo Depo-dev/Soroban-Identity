@@ -9,6 +9,11 @@ export class MetricsService {
       reputation_scores_submitted_total: 0,
       rpc_cache_hits_total: 0,
       rpc_cache_misses_total: 0,
+      did_cache_hits_total: 0,
+      did_cache_misses_total: 0,
+      did_cache_sets_total: 0,
+      did_cache_errors_total: 0,
+      did_cache_invalidations_total: 0,
       rpc_retries_total: 0,
     };
     this.rpcLatencies = [];
@@ -48,6 +53,11 @@ export class MetricsService {
       else if (name === 'credentials_issued_total') helpText = 'Total number of credentials issued';
       else if (name === 'credentials_revoked_total') helpText = 'Total number of credentials revoked';
       else if (name === 'reputation_scores_submitted_total') helpText = 'Total number of reputation scores submitted';
+      else if (name === 'did_cache_hits_total') helpText = 'Total DID document cache hits';
+      else if (name === 'did_cache_misses_total') helpText = 'Total DID document cache misses';
+      else if (name === 'did_cache_sets_total') helpText = 'Total DID documents written to the cache';
+      else if (name === 'did_cache_errors_total') helpText = 'Total DID cache operation failures';
+      else if (name === 'did_cache_invalidations_total') helpText = 'Total DID cache invalidations';
       else if (name === 'rpc_cache_hits_total') helpText = 'Total number of RPC cache hits';
       else if (name === 'rpc_cache_misses_total') helpText = 'Total number of RPC cache misses';
       else if (name === 'rpc_retries_total') helpText = 'Total number of RPC retries';
