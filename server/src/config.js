@@ -140,6 +140,13 @@ export function loadConfig(env = process.env) {
     rpcRetryBackoff: parseInteger(env.RPC_RETRY_BACKOFF, 2),
     // EVENT_POLL_INTERVAL_MS=0 disables the event poller (allowZero: true)
     eventPollIntervalMs: parseInteger(env.EVENT_POLL_INTERVAL_MS, 5000, true),
+    // WS_ENABLED=false turns the WebSocket endpoint off entirely
+    wsEnabled: (env.WS_ENABLED ?? "true").toLowerCase() !== "false",
+    wsPath: env.WS_PATH ?? "/ws",
+    wsMessageLimit: parseInteger(env.WS_MESSAGE_LIMIT, 60),
+    wsMessageWindowMs: parseInteger(env.WS_MESSAGE_WINDOW_MS, 60_000),
+    // WS_HEARTBEAT_INTERVAL_MS=0 disables heartbeats (allowZero: true)
+    wsHeartbeatIntervalMs: parseInteger(env.WS_HEARTBEAT_INTERVAL_MS, 30_000, true),
     contracts: {
       identity: env.IDENTITY_REGISTRY_ID ?? "",
       credential: env.CREDENTIAL_CONTRACT_ID ?? env.CREDENTIAL_MANAGER_ID ?? "",
@@ -189,6 +196,12 @@ export function validateConfig(env = process.env) {
     { key: "RPC_RETRY_BASE_MS", desc: "must be a valid integer" },
     { key: "RPC_RETRY_BACKOFF", desc: "must be a valid integer" },
     { key: "EVENT_POLL_INTERVAL_MS", desc: "must be a valid integer" },
+    { key: "WS_MESSAGE_LIMIT", desc: "must be a valid integer" },
+    { key: "WS_MESSAGE_WINDOW_MS", desc: "must be a valid integer" },
+    { key: "WS_HEARTBEAT_INTERVAL_MS", desc: "must be a valid integer" },
+    { key: "HEALTH_PROBE_TIMEOUT_MS", desc: "must be a valid integer" },
+    { key: "NOTIFICATION_MAX_RETRIES", desc: "must be a valid integer" },
+    { key: "NOTIFICATION_RETRY_BASE_MS", desc: "must be a valid integer" },
     { key: "DID_CACHE_TTL_MS", desc: "must be a valid integer" },
     { key: "REDIS_MAX_RETRIES", desc: "must be a valid integer" },
     { key: "REDIS_RETRY_BASE_MS", desc: "must be a valid integer" },
@@ -299,6 +312,11 @@ export function logDefaultValues(env = process.env) {
     { key: "RPC_RETRY_BASE_MS", defaultVal: "500" },
     { key: "RPC_RETRY_BACKOFF", defaultVal: "2" },
     { key: "EVENT_POLL_INTERVAL_MS", defaultVal: "5000" },
+    { key: "WS_ENABLED", defaultVal: "true" },
+    { key: "WS_PATH", defaultVal: "'/ws'" },
+    { key: "WS_MESSAGE_LIMIT", defaultVal: "60" },
+    { key: "WS_MESSAGE_WINDOW_MS", defaultVal: "60000" },
+    { key: "WS_HEARTBEAT_INTERVAL_MS", defaultVal: "30000" },
   ];
 
   for (const item of defaults) {
