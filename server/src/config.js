@@ -186,6 +186,16 @@ export function loadConfig(env = process.env) {
     credentialStorePath: env.CREDENTIAL_STORE_PATH
       ? path.resolve(env.CREDENTIAL_STORE_PATH)
       : path.join(DEFAULT_DATA_DIR, "credentials.json"),
+    redisUrl: env.REDIS_URL ?? "",
+    didCacheTtlMs: parseInteger(env.DID_CACHE_TTL_MS, 60 * 1000),
+    redisMaxRetries: parseInteger(env.REDIS_MAX_RETRIES, 5),
+    redisRetryBaseMs: parseInteger(env.REDIS_RETRY_BASE_MS, 200),
+    redisCommandTimeoutMs: parseInteger(env.REDIS_COMMAND_TIMEOUT_MS, 1000),
+    cacheFailureThreshold: parseInteger(env.CACHE_FAILURE_THRESHOLD, 3),
+    didCacheWarmList: (env.DID_CACHE_WARM_LIST ?? "")
+      .split(",")
+      .map((entry) => entry.trim())
+      .filter(Boolean),
     healthProbeTimeoutMs: parseInteger(env.HEALTH_PROBE_TIMEOUT_MS, 2000),
     redisUrl: env.REDIS_URL ?? "",
     expiryWarningDays: parseInteger(env.EXPIRY_WARNING_DAYS, 7),
@@ -225,6 +235,13 @@ export function loadConfig(env = process.env) {
     rpcRetryBackoff: parseInteger(env.RPC_RETRY_BACKOFF, 2),
     // EVENT_POLL_INTERVAL_MS=0 disables the event poller (allowZero: true)
     eventPollIntervalMs: parseInteger(env.EVENT_POLL_INTERVAL_MS, 5000, true),
+    // WS_ENABLED=false turns the WebSocket endpoint off entirely
+    wsEnabled: (env.WS_ENABLED ?? "true").toLowerCase() !== "false",
+    wsPath: env.WS_PATH ?? "/ws",
+    wsMessageLimit: parseInteger(env.WS_MESSAGE_LIMIT, 60),
+    wsMessageWindowMs: parseInteger(env.WS_MESSAGE_WINDOW_MS, 60_000),
+    // WS_HEARTBEAT_INTERVAL_MS=0 disables heartbeats (allowZero: true)
+    wsHeartbeatIntervalMs: parseInteger(env.WS_HEARTBEAT_INTERVAL_MS, 30_000, true),
     contracts: {
       identity: env.IDENTITY_REGISTRY_ID ?? "",
       credential: env.CREDENTIAL_CONTRACT_ID ?? env.CREDENTIAL_MANAGER_ID ?? "",
@@ -337,6 +354,18 @@ export function validateConfig(env = process.env) {
     }
   }
 
+  const redisUrl = env.REDIS_URL;
+  if (redisUrl !== undefined && redisUrl !== "") {
+    try {
+      const parsed = new URL(redisUrl);
+      if (parsed.protocol !== "redis:" && parsed.protocol !== "rediss:") {
+        invalid.push("REDIS_URL: must use the redis:// or rediss:// scheme");
+      }
+    } catch {
+      invalid.push("REDIS_URL: must be a valid URL");
+    }
+  }
+
   const webhookUrl = env.NOTIFICATION_WEBHOOK_URL;
   if (webhookUrl !== undefined && webhookUrl !== "") {
     try {
@@ -383,6 +412,10 @@ export function logDefaultValues(env = process.env) {
     { key: "EXPIRY_WARNING_DAYS", defaultVal: "7" },
     { key: "EXPIRY_JOB_INTERVAL_MS", defaultVal: "3600000" },
     { key: "EXPIRY_CONCURRENCY", defaultVal: "8" },
+    { key: "REDIS_URL", defaultVal: "'' (cache disabled)" },
+    { key: "DID_CACHE_TTL_MS", defaultVal: "60000" },
+    { key: "REDIS_MAX_RETRIES", defaultVal: "5" },
+    { key: "CACHE_FAILURE_THRESHOLD", defaultVal: "3" },
     { key: "HEALTH_PROBE_TIMEOUT_MS", defaultVal: "2000" },
     { key: "REDIS_URL", defaultVal: "'' (disabled)" },
     { key: "EXPIRY_CRON_SCHEDULE", defaultVal: "'' (interval mode)" },

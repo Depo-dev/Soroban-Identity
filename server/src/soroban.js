@@ -22,10 +22,13 @@ export class SorobanTimeoutError extends Error {
 }
 
 export class SorobanClient {
-  constructor(config, metrics) {
+  constructor(config, metrics, { didCache = null } = {}) {
     this.config = config;
     this.metrics = metrics;
     this.cache = new RpcCache(config.rpcCacheTtlMs);
+    // Optional Redis-backed DID cache. When absent, resolution falls straight
+    // through to the contract, so the client works uncached unchanged.
+    this.didCache = didCache;
     this.circuitBreaker = new CircuitBreaker({
       failureThreshold: 5,
       successThreshold: 2,
@@ -147,6 +150,49 @@ export class SorobanClient {
     return contracts;
   }
 
+  /**
+   * Resolve a DID document, reading through the Redis cache when one is
+   * configured.
+   *
+   * A cache miss, a cache error, or an unavailable Redis all fall through to
+   * the contract, so resolution never fails because of the cache.
+   *
+   * @param {string} didOrAddress - `did:stellar:G...` or a bare `G...`
+   * @returns {Promise<object|null>} The DID document, or null when unknown.
+   */
+  async resolveDid(didOrAddress) {
+    const address = String(didOrAddress ?? '').startsWith('did:stellar:')
+      ? String(didOrAddress).slice('did:stellar:'.length)
+      : String(didOrAddress ?? '');
+
+    if (!address) return null;
+
+    if (this.didCache) {
+      const cached = await this.didCache.get(address);
+      if (cached) return cached;
+    }
+
+    const raw = await this.invoke(this.config.contracts.identity, 'get_did', ['--address', address]);
+    const document = parseDidDocument(raw, address);
+
+    // Only cache a real document. Caching a negative result would let a DID
+    // created moments later stay invisible for the whole TTL.
+    if (document && this.didCache) {
+      await this.didCache.set(address, document);
+    }
+
+    return document;
+  }
+
+  /**
+   * Drop a DID from the cache. Call after any write that changes the document,
+   * so a stale copy cannot outlive the write.
+   */
+  async invalidateDid(didOrAddress) {
+    if (!this.didCache) return false;
+    return this.didCache.invalidate(didOrAddress);
+  }
+
   async getIssuers() {
     const key = `${this.config.contracts.credential}:get_issuers:[]`;
     const cached = this.cache.get(key);
@@ -252,3 +298,35 @@ function parseAddressList(raw) {
 }
 
 export { runCommand };
+
+/**
+ * Parse a `get_did` contract response into a DID document.
+ *
+ * The CLI returns JSON on stdout; anything unparseable, empty, or explicitly
+ * null means the DID does not exist.
+ */
+export function parseDidDocument(raw, address) {
+  if (raw === null || raw === undefined || raw === '') return null;
+
+  let parsed = raw;
+  if (typeof raw === 'string') {
+    const trimmed = raw.trim();
+    if (trimmed === '' || trimmed === 'null') return null;
+    try {
+      parsed = JSON.parse(trimmed);
+    } catch {
+      return null;
+    }
+  }
+
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return null;
+
+  return {
+    id: `did:stellar:${address}`,
+    controller: parsed.controller ?? `did:stellar:${address}`,
+    createdAt: Number(parsed.created_at ?? parsed.createdAt ?? 0),
+    updatedAt: Number(parsed.updated_at ?? parsed.updatedAt ?? 0),
+    metadata: parsed.metadata ?? {},
+    active: parsed.active !== false,
+  };
+}
