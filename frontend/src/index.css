@@ -525,3 +525,70 @@ button:disabled { background: var(--btn-disabled-bg); color: var(--btn-disabled-
   outline-offset: 2px;
   border-radius: 0.5rem;
 }
+
+/* Forced-colors mode strips custom outline colours; keep a ring visible. */
+@media (forced-colors: active) {
+  :focus-visible,
+  [role="button"]:focus-visible {
+    outline: 2px solid Highlight;
+  }
+}
+
+/* ── Skip link ───────────────────────────────────────────────────────────────
+   Off-screen until focused, so keyboard users can jump past the header
+   controls straight into the page content (WCAG 2.4.1). */
+.skip-link {
+  position: absolute;
+  left: -9999px;
+  top: 0;
+  z-index: 1100;
+  padding: 0.6rem 1rem;
+  background: var(--card-bg, #fff);
+  color: var(--text, #111);
+  border: 2px solid var(--focus-ring);
+  border-radius: 0 0 0.4rem 0;
+  font-size: 0.9rem;
+  font-weight: 600;
+  text-decoration: none;
+}
+
+.skip-link:focus,
+.skip-link:focus-visible {
+  left: 0;
+}
+
+/* The main landmark is focused programmatically by the skip link; it is not an
+   interactive control, so it must not paint a focus ring of its own. */
+main:focus {
+  outline: none;
+}
+
+/* ── Reduced motion ──────────────────────────────────────────────────────────
+   Honour a user's OS-level preference to limit animation (WCAG 2.3.3). */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+}
+
+/* ── Visually hidden ─────────────────────────────────────────────────────────
+   Removes content from the visual layout while keeping it in the accessibility
+   tree, for labels that would be redundant on screen. Uses the clip-path
+   pattern rather than display:none, which would hide it from screen readers. */
+.visually-hidden {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  margin: -1px;
+  padding: 0;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  clip-path: inset(50%);
+  white-space: nowrap;
+  border: 0;
+}

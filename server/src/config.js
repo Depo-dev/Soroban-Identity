@@ -1,5 +1,6 @@
 import path from "node:path";
 import { logger } from './logger.js';
+import { parseCronExpression } from './cron.js';
 
 const DEFAULT_DATA_DIR = path.resolve(process.cwd(), "data");
 
@@ -110,11 +111,19 @@ export function loadConfig(env = process.env) {
       60 * 60 * 1000,
     ),
     expiryConcurrency: parseInteger(env.EXPIRY_CONCURRENCY, 8),
+    expiryCronSchedule: env.EXPIRY_CRON_SCHEDULE ?? "",
     notificationWebhookUrl: env.NOTIFICATION_WEBHOOK_URL ?? "",
     subjectNotificationWebhooks: parseJson(
       env.SUBJECT_NOTIFICATION_WEBHOOKS,
       {},
     ),
+    emailApiUrl: env.EMAIL_API_URL ?? "",
+    emailApiKey: env.EMAIL_API_KEY ?? "",
+    emailFrom: env.EMAIL_FROM ?? "",
+    notificationEmail: env.NOTIFICATION_EMAIL ?? "",
+    subjectNotificationEmails: parseJson(env.SUBJECT_NOTIFICATION_EMAILS, {}),
+    notificationMaxRetries: parseInteger(env.NOTIFICATION_MAX_RETRIES, 3),
+    notificationRetryBaseMs: parseInteger(env.NOTIFICATION_RETRY_BASE_MS, 500),
     // SOROBAN_POOL_SIZE=0 disables the pool (allowZero: true)
     poolSize: parseInteger(env.SOROBAN_POOL_SIZE, 4, true),
     sorobanInvokeTimeoutMs: parseInteger(env.SOROBAN_INVOKE_TIMEOUT_MS, 10000),
@@ -224,6 +233,27 @@ export function validateConfig(env = process.env) {
     }
   }
 
+  const emailApiUrl = env.EMAIL_API_URL;
+  if (emailApiUrl !== undefined && emailApiUrl !== "") {
+    try {
+      new URL(emailApiUrl);
+    } catch {
+      invalid.push("EMAIL_API_URL: must be a valid URL");
+    }
+    if (!env.EMAIL_FROM) {
+      invalid.push("EMAIL_FROM: required when EMAIL_API_URL is set");
+    }
+  }
+
+  const cronSchedule = env.EXPIRY_CRON_SCHEDULE;
+  if (cronSchedule !== undefined && cronSchedule !== "") {
+    try {
+      parseCronExpression(cronSchedule);
+    } catch (error) {
+      invalid.push(`EXPIRY_CRON_SCHEDULE: ${error.message}`);
+    }
+  }
+
   return {
     isValid: missing.length === 0 && invalid.length === 0,
     missing,
@@ -244,7 +274,13 @@ export function logDefaultValues(env = process.env) {
     { key: "DID_CACHE_TTL_MS", defaultVal: "60000" },
     { key: "REDIS_MAX_RETRIES", defaultVal: "5" },
     { key: "CACHE_FAILURE_THRESHOLD", defaultVal: "3" },
+    { key: "EXPIRY_CRON_SCHEDULE", defaultVal: "'' (interval mode)" },
     { key: "NOTIFICATION_WEBHOOK_URL", defaultVal: "''" },
+    { key: "EMAIL_API_URL", defaultVal: "''" },
+    { key: "EMAIL_FROM", defaultVal: "''" },
+    { key: "NOTIFICATION_EMAIL", defaultVal: "''" },
+    { key: "NOTIFICATION_MAX_RETRIES", defaultVal: "3" },
+    { key: "NOTIFICATION_RETRY_BASE_MS", defaultVal: "500" },
     { key: "SUBJECT_NOTIFICATION_WEBHOOKS", defaultVal: "{}" },
     { key: "SOROBAN_POOL_SIZE", defaultVal: "4" },
     { key: "SOROBAN_INVOKE_TIMEOUT_MS", defaultVal: "10000" },
