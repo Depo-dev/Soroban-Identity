@@ -28,6 +28,93 @@ The server configuration can be customized using the following environment varia
 | `AUDIT_LOG_RETENTION_DAYS` | Number of days to retain rotated audit logs. | `30` |
 | `CREDENTIAL_STORE_PATH` | Storage location for credential records. | `[DATA_DIR]/credentials.json` |
 | `EXPIRY_CONCURRENCY` | Maximum concurrent credential expiry notifications. Controls parallelism to prevent event loop blocking. | `8` |
+| `RATE_LIMIT_WHITELIST` | Comma-separated IPs or CIDR ranges exempt from rate limiting. | unset |
+| `RATE_LIMIT_MAX_BUCKETS` | Bucket count that triggers eviction of expired windows. | `10000` |
+| `TRUST_PROXY` | Trust `X-Forwarded-For` when resolving the client IP. | `false` |
+
+## Rate Limiting
+
+Two budgets apply to every non-exempt request, and both must be satisfied.
+`/info`, `/health`, and `/metrics` are exempt.
+
+### Per-endpoint limits
+
+Evaluated first, since they are the tighter constraint on the expensive routes.
+The first matching rule wins.
+
+| Rule | Match | Limit |
+| --- | --- | --- |
+| `credential_issuance` | `POST /credentials`, `POST /credentials/issue` | 10 per 15 min |
+| `credential_revocation` | `POST /credentials/:id/revoke` | 20 per 15 min |
+| `general` | everything else | 100 per 15 min |
+
+These are per client, and independent of each other: exhausting the issuance
+budget does not block reads. A `GET /credentials` is a read and falls under
+`general`, not `credential_issuance`.
+
+### Per-tier limits
+
+The existing subscription tiers still apply on top, with separate read and
+write budgets:
+
+| Tier | Reads | Writes |
+| --- | --- | --- |
+| free | 60/min | 20/min |
+| pro | 300/min | 100/min |
+| enterprise | 1200/min | 500/min |
+
+### Response headers
+
+| Header | Meaning |
+| --- | --- |
+| `X-RateLimit-Limit` | Limit of whichever budget is closest to exhaustion |
+| `X-RateLimit-Remaining` | Requests left in that budget |
+| `X-RateLimit-Reset` | Unix seconds at which it resets |
+| `X-RateLimit-Tier` | Resolved subscription tier |
+| `X-RateLimit-Scope` | `endpoint` or `tier` |
+| `X-RateLimit-Bypass` | `whitelist` when the caller is exempt |
+| `Retry-After` | Seconds to wait, sent with every 429 |
+
+The reported budget is whichever will stop the client first, so the headers are
+not misleading when the endpoint limit is nearly spent but the tier limit is
+not.
+
+### 429 responses
+
+```json
+{
+  "error": "rate_limit_exceeded",
+  "code": "RATE_LIMIT_EXCEEDED",
+  "scope": "endpoint",
+  "rule": "credential_issuance",
+  "message": "Rate limit exceeded for 'credential_issuance' (10 requests per window). Retry in 840s.",
+  "limit": 10,
+  "windowMinutes": 14,
+  "retryAfter": 840
+}
+```
+
+An endpoint denial is reported as such and does **not** carry the upgrade
+prompt, because upgrading a subscription does not raise a per-endpoint limit.
+Tier denials keep the existing upgrade payload.
+
+### Whitelisting
+
+`RATE_LIMIT_WHITELIST` accepts exact addresses and IPv4 CIDR ranges
+(`10.0.0.5,10.0.0.0/24`). Whitelisted callers skip both budgets and are
+answered with `X-RateLimit-Bypass: whitelist`.
+
+Whitelist matching uses the socket address unless `TRUST_PROXY=true`. Without
+that, a caller could whitelist itself simply by sending an `X-Forwarded-For`
+header.
+
+### Violations and memory
+
+Every denial is logged at `warn` with `type: "rate_limit_violation"`, the rule,
+scope, IP, method, path, API key id, and user agent. Expired buckets are
+evicted once the map reaches `RATE_LIMIT_MAX_BUCKETS`, so a stream of distinct
+client addresses cannot grow it without bound. Eviction runs on write, not on a
+timer, so an idle process does no work.
 
 ## API Key Scopes
 

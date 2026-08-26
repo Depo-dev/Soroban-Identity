@@ -90,6 +90,12 @@ export function loadConfig(env = process.env) {
     credentialStorePath: env.CREDENTIAL_STORE_PATH
       ? path.resolve(env.CREDENTIAL_STORE_PATH)
       : path.join(DEFAULT_DATA_DIR, "credentials.json"),
+    rateLimitWhitelist: (env.RATE_LIMIT_WHITELIST ?? "")
+      .split(",")
+      .map((entry) => entry.trim())
+      .filter(Boolean),
+    rateLimitMaxBuckets: parseInteger(env.RATE_LIMIT_MAX_BUCKETS, 10000),
+    trustProxy: env.TRUST_PROXY === "true",
     expiryWarningDays: parseInteger(env.EXPIRY_WARNING_DAYS, 7),
     expiryReminderThresholds: parseThresholds(
       env.EXPIRY_REMINDER_THRESHOLDS,
@@ -168,6 +174,7 @@ export function validateConfig(env = process.env) {
     { key: "RPC_RETRY_BASE_MS", desc: "must be a valid integer" },
     { key: "RPC_RETRY_BACKOFF", desc: "must be a valid integer" },
     { key: "EVENT_POLL_INTERVAL_MS", desc: "must be a valid integer" },
+    { key: "RATE_LIMIT_MAX_BUCKETS", desc: "must be a valid integer" },
   ];
 
   for (const item of numericVars) {
@@ -213,6 +220,9 @@ export function logDefaultValues(env = process.env) {
     { key: "EXPIRY_WARNING_DAYS", defaultVal: "7" },
     { key: "EXPIRY_JOB_INTERVAL_MS", defaultVal: "3600000" },
     { key: "EXPIRY_CONCURRENCY", defaultVal: "8" },
+    { key: "RATE_LIMIT_WHITELIST", defaultVal: "'' (no exemptions)" },
+    { key: "RATE_LIMIT_MAX_BUCKETS", defaultVal: "10000" },
+    { key: "TRUST_PROXY", defaultVal: "false" },
     { key: "NOTIFICATION_WEBHOOK_URL", defaultVal: "''" },
     { key: "SUBJECT_NOTIFICATION_WEBHOOKS", defaultVal: "{}" },
     { key: "SOROBAN_POOL_SIZE", defaultVal: "4" },

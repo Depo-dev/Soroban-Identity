@@ -46,8 +46,18 @@ const SERVER_FEATURES = [
   "api_versioning",
 ];
 
-export function createApp({ config, soroban, metrics, metricsAggregator, webhookService = new WebhookDeliveryService(config) }) {
-  return function app(req, res) {
+export function createApp({ config, soroban, metrics, metricsAggregator, rateLimiter = null, webhookService = new WebhookDeliveryService(config) }) {
+  // One limiter per app instance, so its buckets live as long as the server
+  // rather than being rebuilt per request.
+  const limiter =
+    rateLimiter ??
+    new TieredRateLimiter({
+      whitelist: config.rateLimitWhitelist ?? [],
+      trustProxy: config.trustProxy ?? false,
+      maxBuckets: config.rateLimitMaxBuckets ?? 10000,
+    });
+
+  return async function app(req, res) {
     const url = new URL(
       req.url,
       `http://${req.headers.host ?? "localhost"}`,
@@ -103,28 +113,52 @@ export function createApp({ config, soroban, metrics, metricsAggregator, webhook
     // Rate limiting check (exempt /info, /health, /metrics)
     const isExempt = ["/info", "/health", "/metrics"].includes(url.pathname);
     if (!isExempt) {
-      const rateResult = rateLimiter.consume(req);
-      res.setHeader("X-RateLimit-Tier", rateResult.tier);
-      res.setHeader("X-RateLimit-Limit", String(rateResult.limit));
-      res.setHeader("X-RateLimit-Remaining", String(rateResult.remaining));
-      res.setHeader("X-RateLimit-Reset", String(rateResult.resetAt));
+      const rateResult = limiter.check(req, url.pathname);
+
+      if (rateResult.whitelisted) {
+        res.setHeader("X-RateLimit-Bypass", "whitelist");
+      } else {
+        // Report whichever budget is closest to exhaustion, so a client sees
+        // the limit that will actually stop it first.
+        const reported = rateResult.binding ?? rateResult;
+        res.setHeader("X-RateLimit-Tier", String(rateResult.tier ?? reported.rule ?? "free"));
+        res.setHeader("X-RateLimit-Limit", String(reported.limit));
+        res.setHeader("X-RateLimit-Remaining", String(reported.remaining));
+        res.setHeader("X-RateLimit-Reset", String(reported.resetAt));
+        if (rateResult.scope === "endpoint" || rateResult.endpoint?.rule) {
+          res.setHeader("X-RateLimit-Scope", rateResult.scope === "endpoint" ? "endpoint" : "tier");
+        }
+      }
 
       if (!rateResult.allowed) {
         res.setHeader("Retry-After", String(rateResult.retryAfter));
-        if (rateResult.tier === "free") {
+
+        // An endpoint denial is not a tier problem, so it must not be dressed
+        // up as one — upgrading would not raise a per-endpoint limit.
+        const isEndpointDenial = rateResult.scope === "endpoint";
+
+        if (!isEndpointDenial && rateResult.tier === "free") {
           res.setHeader(
             "X-Upgrade-Available",
             "Upgrade to Pro or Enterprise for higher limits: https://soroban-identity.org/pricing"
           );
         }
+
+        const windowMinutes = Math.round(
+          ((rateResult.resetAt * 1000) - Date.now()) / 60000
+        );
+
         return sendJson(res, 429, {
           error: "rate_limit_exceeded",
           code: "RATE_LIMIT_EXCEEDED",
-          message: rateResult.tier === "free"
-            ? `Free tier rate limit exceeded (${rateResult.limit} req/min). Upgrade to Pro (300 req/min) or Enterprise (1200 req/min) for higher limits.`
-            : `Rate limit exceeded for tier '${rateResult.tier}' (${rateResult.limit} req/min).`,
-          tier: rateResult.tier,
-          ...(rateResult.tier === "free"
+          scope: rateResult.scope,
+          message: isEndpointDenial
+            ? `Rate limit exceeded for '${rateResult.rule}' (${rateResult.limit} requests per window). Retry in ${rateResult.retryAfter}s.`
+            : rateResult.tier === "free"
+              ? `Free tier rate limit exceeded (${rateResult.limit} req/min). Upgrade to Pro (300 req/min) or Enterprise (1200 req/min) for higher limits.`
+              : `Rate limit exceeded for tier '${rateResult.tier}' (${rateResult.limit} req/min).`,
+          ...(isEndpointDenial ? { rule: rateResult.rule, windowMinutes } : { tier: rateResult.tier }),
+          ...(!isEndpointDenial && rateResult.tier === "free"
             ? {
                 upgrade: {
                   message: "Upgrade to Pro or Enterprise for increased rate limits.",
@@ -133,6 +167,7 @@ export function createApp({ config, soroban, metrics, metricsAggregator, webhook
                 },
               }
             : {}),
+          limit: rateResult.limit,
           retryAfter: rateResult.retryAfter,
         });
       }
@@ -168,7 +203,6 @@ export function createApp({ config, soroban, metrics, metricsAggregator, webhook
           return handleEventsRequest(req, res, url, { config, soroban });
         }
 
-        if (req.method === "GET" && url.pathname === "/metrics") {
         if (req.method === "GET" && pathname === "/metrics") {
           if (metricsAggregator)
             await metricsAggregator
