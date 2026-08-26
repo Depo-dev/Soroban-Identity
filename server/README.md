@@ -28,6 +28,52 @@ The server configuration can be customized using the following environment varia
 | `AUDIT_LOG_RETENTION_DAYS` | Number of days to retain rotated audit logs. | `30` |
 | `CREDENTIAL_STORE_PATH` | Storage location for credential records. | `[DATA_DIR]/credentials.json` |
 | `EXPIRY_CONCURRENCY` | Maximum concurrent credential expiry notifications. Controls parallelism to prevent event loop blocking. | `8` |
+| `HEALTH_PROBE_TIMEOUT_MS` | Per-dependency timeout for health and readiness probes. | `2000` |
+| `REDIS_URL` | Redis connection URL. Unset means the cache dependency reports `disabled`. | unset |
+
+## Health and Readiness
+
+| Endpoint | Purpose | Codes |
+| --- | --- | --- |
+| `GET /health` | Full dependency report with version and uptime | `200` healthy or degraded, `503` unhealthy |
+| `GET /ready` | Kubernetes readiness probe | `200` ready, `503` not ready |
+| `GET /live` | Kubernetes liveness probe | always `200` while the process responds |
+
+All three skip authentication and rate limiting.
+
+`/health` probes storage, RPC, contracts, and Redis in parallel, each with its
+own `HEALTH_PROBE_TIMEOUT_MS` budget, and reports per-dependency status, latency,
+and error message:
+
+```json
+{
+  "status": "degraded",
+  "version": "0.1.0",
+  "uptimeSeconds": 3742,
+  "startedAt": "2026-01-01T00:00:00.000Z",
+  "nodeVersion": "v20.11.0",
+  "dependencies": {
+    "storage":   { "status": "up",       "latencyMs": 2,  "dataDir": "data", "writable": true },
+    "rpc":       { "status": "up",       "latencyMs": 41, "rpcStatus": "healthy", "latestLedger": 51234 },
+    "contracts": { "status": "degraded", "latencyMs": 88, "reachable": 2, "total": 3 },
+    "redis":     { "status": "disabled", "latencyMs": 0,  "reason": "REDIS_URL is not configured" }
+  }
+}
+```
+
+Dependency states are `up`, `degraded`, `down`, and `disabled`. A `disabled`
+dependency is one that is not configured, and never counts against overall
+health. Overall `status` is `unhealthy` if any dependency is `down`, `degraded`
+if any is `degraded`, otherwise `healthy`.
+
+`/health` returns `503` only when the overall status is `unhealthy`, so a
+partially degraded deployment is not pulled out of a load balancer.
+
+`/ready` gates on storage and RPC alone — the dependencies required to answer a
+request — and names what is failing. Unreachable contracts or a cold cache leave
+most endpoints serviceable, so they are reported by `/health` but do not block
+readiness. `/live` probes nothing at all, so a dependency outage never causes an
+orchestrator to restart an otherwise healthy process.
 
 ## API Key Scopes
 
