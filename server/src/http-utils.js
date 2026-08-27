@@ -78,7 +78,11 @@ export async function readJson(req, config) {
   if (chunks.length === 0) return {};
   const raw = Buffer.concat(chunks).toString("utf8");
   if (!raw.trim()) return {};
-  return JSON.parse(raw);
+  const parsed = JSON.parse(raw);
+  // Stashed for the access log, which runs on response finish and would
+  // otherwise have no way to see a body that was already consumed here.
+  req.loggedBody = parsed;
+  return parsed;
 }
 
 export function sendJson(res, statusCode, body, headers = {}) {
