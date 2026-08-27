@@ -12,8 +12,7 @@ import {
   readWebhooks,
   WebhookDeliveryService,
 } from "./webhooks.js";
-import { collectHealth, collectReadiness } from "./health.js";
-import { readNotificationLog, summarizeNotificationLog } from "./notification-log.js";
+import { startAccessLog } from "./access-log.js";
 import { createDataLoaders } from "./dataloader.js";
 import { executeGraphQL, renderGraphiQLPlayground } from "./graphql.js";
 import {
@@ -50,22 +49,7 @@ const SERVER_FEATURES = [
   "api_versioning",
 ];
 
-export function createApp({ config, soroban, metrics, metricsAggregator, didCache = null, webhookService = new WebhookDeliveryService(config) }) {
-export function createApp({
-  config,
-  soroban,
-  metrics,
-  metricsAggregator,
-  webhookService = new WebhookDeliveryService(config),
-  apiKeyService = new ApiKeyService(config),
-  rateLimiter = new TieredRateLimiter(),
-  realtime = null,
-}) {
-  // Expose the key service on config so http-utils.requireAuth can validate
-  // issued API keys instead of falling back to the single admin key.
-  config.apiKeyService = apiKeyService;
-
-export function createApp({ config, soroban, metrics, metricsAggregator, redisClient = null, webhookService = new WebhookDeliveryService(config) }) {
+export function createApp({ config, soroban, metrics, metricsAggregator, accessLogSink = null, webhookService = new WebhookDeliveryService(config) }) {
   return async function app(req, res) {
     const url = new URL(
       req.url,
@@ -104,6 +88,17 @@ export function createApp({ config, soroban, metrics, metricsAggregator, redisCl
     
     if (!isMetricsEndpoint) {
       res.setHeader("X-Request-ID", requestId);
+    }
+
+    // Access logging is attached before any routing so a request that is
+    // rejected by CORS, auth, or the rate limiter is still recorded.
+    if (config.accessLogEnabled && !isMetricsEndpoint) {
+      const finishAccessLog = startAccessLog(req, res, {
+        requestId,
+        config,
+        sink: accessLogSink,
+      });
+      res.on("finish", () => finishAccessLog({ requestBody: req.loggedBody ?? null }));
     }
 
     // Apply CORS headers
